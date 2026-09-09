@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Pz.Connector.BigQuery/Pz.Connector.BigQuery.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Pz.Connector.BigQuery.Tests/Pz.Connector.BigQuery.Tests.csproj" />
+  </Folder>
+</Solution>
