@@ -27,6 +27,14 @@ internal class BqReadSessionFactory(BqConnectionConfig cfg, GoogleCredential? cr
 
     public async Task<BigQueryReadClient> ClientAsync(CancellationToken ct)
     {
+        // The gRPC client mints its own bearer tokens from the same GoogleCredential for every
+        // call it makes, independently of this fetch -- but a token this call retrieves is the
+        // same one (or drawn from the same cache) the credential hands the call credentials layer,
+        // so registering it here closes the same secret-in-a-message hole the REST path closes at
+        // BqRestClient's own AddSecret call, for every caller of this method (CreateAsync and
+        // ReadRowsAsync alike).
+        await RegisterCredentialTokenAsync(ct).ConfigureAwait(false);
+
         if (_client is { } existing)
         {
             return existing;
@@ -64,6 +72,15 @@ internal class BqReadSessionFactory(BqConnectionConfig cfg, GoogleCredential? cr
         }
 
         return _client;
+    }
+
+    private async Task RegisterCredentialTokenAsync(CancellationToken ct)
+    {
+        var token = await BqAuth.AccessTokenAsync(cred, ct).ConfigureAwait(false);
+        if (token is not null)
+        {
+            r.AddSecret(token);
+        }
     }
 
     /// <summary>Creates one read session over <paramref name="table"/>. <paramref name="maxStreams"/>
