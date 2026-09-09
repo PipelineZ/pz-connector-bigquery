@@ -19,13 +19,14 @@ internal sealed partial record BqJob
 
     public static string NewJobId(string purpose) => $"pz_{purpose}_{Guid.NewGuid():N}";
 
-    /// <summary>Inserts <paramref name="job"/> and polls <c>jobs.get</c> until <c>DONE</c>, applying
-    /// the backoff schedule 250 ms → 500 ms → 1 s → 2 s (then 2 s forever) between calls through
+    /// <summary>Inserts <paramref name="job"/> and waits for it to reach <c>DONE</c>, applying the
+    /// backoff schedule 250 ms → 500 ms → 1 s → 2 s (then 2 s forever) between polls through
     /// <paramref name="time"/> so a test drives it with a <c>FakeTimeProvider</c> instead of a real
-    /// sleep. The insert response's own status is not trusted for completion -- BigQuery's
-    /// <c>jobs.insert</c> answers as soon as the job is accepted, essentially never already
-    /// <c>DONE</c> -- so the very first completion check is always a fresh <c>jobs.get</c>, issued
-    /// with no delay, and every later one is separated by the schedule above.</summary>
+    /// sleep. An insert response already reporting <c>DONE</c> is itself a terminal status -- nothing
+    /// requires a job to still be running just because it was only just submitted -- so it is
+    /// classified directly with no <c>jobs.get</c> call at all; only a response reporting anything
+    /// else falls through to polling, whose very first check is a fresh <c>jobs.get</c> issued with
+    /// no delay, every later one separated by the schedule above.</summary>
     public static async Task<BqJob> SubmitAndWaitAsync(
         BqRestClient rest, string project, BqJob job, string purpose, TimeProvider time, ILogger logger, CancellationToken ct)
     {
@@ -37,17 +38,21 @@ internal sealed partial record BqJob
         // to the same region the job actually runs in.
         var location = inserted.JobReference?.Location ?? job.JobReference?.Location;
 
-        var current = await rest.GetJobAsync(project, jobId, location, ct).ConfigureAwait(false);
-        var delayIndex = 0;
-
-        while (!string.Equals(current.Status?.State, "DONE", StringComparison.Ordinal))
+        var current = inserted;
+        if (!string.Equals(current.Status?.State, "DONE", StringComparison.Ordinal))
         {
-            var delay = PollDelays[Math.Min(delayIndex, PollDelays.Length - 1)];
-            delayIndex++;
-            logger.LogDebug("bigquery job {JobId} ({Purpose}) is {State}; waiting {Delay} before polling again",
-                jobId, purpose, current.Status?.State, delay);
-            await Task.Delay(delay, time, ct).ConfigureAwait(false);
             current = await rest.GetJobAsync(project, jobId, location, ct).ConfigureAwait(false);
+            var delayIndex = 0;
+
+            while (!string.Equals(current.Status?.State, "DONE", StringComparison.Ordinal))
+            {
+                var delay = PollDelays[Math.Min(delayIndex, PollDelays.Length - 1)];
+                delayIndex++;
+                logger.LogDebug("bigquery job {JobId} ({Purpose}) is {State}; waiting {Delay} before polling again",
+                    jobId, purpose, current.Status?.State, delay);
+                await Task.Delay(delay, time, ct).ConfigureAwait(false);
+                current = await rest.GetJobAsync(project, jobId, location, ct).ConfigureAwait(false);
+            }
         }
 
         if (current.Status?.ErrorResult is { } error)

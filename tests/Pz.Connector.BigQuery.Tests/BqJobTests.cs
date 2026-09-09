@@ -83,6 +83,40 @@ public sealed class BqJobTests
     }
 
     [Fact]
+    public async Task SubmitAndWaitAsync_insert_response_already_done_with_error_classifies_without_polling()
+    {
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Post, "/bigquery/v2/projects/p/jobs", 200,
+            JobJson("job1", "DONE", errorReason: "invalidQuery", errorMessage: "Syntax error"));
+        var client = Client(handler);
+        var job = new BqJob(new BqJobReference("p", "job1", null), null, null);
+        var time = new FakeTimeProvider();
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            () => BqJob.SubmitAndWaitAsync(client, "p", job, "compiling pipeline", time, NullLogger.Instance, CancellationToken.None));
+
+        Assert.False(ex.IsTransient);
+        Assert.Contains("PZBQ0407", ex.Message);
+        Assert.Contains("compiling pipeline", ex.Message);
+        Assert.DoesNotContain(handler.Requests, r => r.Method == HttpMethod.Get);
+    }
+
+    [Fact]
+    public async Task SubmitAndWaitAsync_insert_response_already_done_without_error_is_returned_without_polling()
+    {
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Post, "/bigquery/v2/projects/p/jobs", 200, JobJson("job1", "DONE"));
+        var client = Client(handler);
+        var job = new BqJob(new BqJobReference("p", "job1", null), null, null);
+        var time = new FakeTimeProvider();
+
+        var result = await BqJob.SubmitAndWaitAsync(client, "p", job, "loading", time, NullLogger.Instance, CancellationToken.None);
+
+        Assert.Equal("DONE", result.Status?.State);
+        Assert.DoesNotContain(handler.Requests, r => r.Method == HttpMethod.Get);
+    }
+
+    [Fact]
     public async Task SubmitAndWaitAsync_falls_back_to_the_submitted_jobs_location_when_the_insert_response_omits_it()
     {
         // The insert response below carries no jobReference.location at all; the submitted job

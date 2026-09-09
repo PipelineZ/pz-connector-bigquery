@@ -172,23 +172,19 @@ public sealed class BqQueryModeTests
         Assert.Contains("PZBQ0105", ex.Message, StringComparison.Ordinal);
     }
 
-    // Real BigQuery's job errorResult classifies through BqJob.SubmitAndWaitAsync into PZBQ0407,
-    // naming "materialize query" -- proven deterministically against a synthetic response in
+    // Every kind of query failure this emulator (BqFixture.Image, 0.8.1) reports -- a syntax error, an
+    // unresolved column, an unknown function, even a runtime division-by-zero -- comes back under
+    // errorResult.reason "jobInternalError", never "invalidQuery" (confirmed directly against its
+    // REST API across all four cases, not just the one below). BqErrors.IsTransientReason treats
+    // "jobInternalError" as a transient backend condition, correctly for a genuine internal fault;
+    // real BigQuery's own syntax errors report "invalidQuery" instead, which is what actually drives
+    // PZBQ0407 -- proven deterministically against a synthetic response in
     // BqQueryMaterializerTests.A_failed_job_reports_PZBQ0407_naming_the_materialize_step, since this
-    // emulator (BqFixture.Image, 0.8.1) cannot reproduce that path at all: confirmed directly against
-    // its REST API, a broken query's jobs.insert response carries a genuine errorResult (reason
-    // "jobInternalError"), but the very next jobs.get for that same jobId already reports
-    // {"state":"DONE"} with no error whatsoever -- the emulator drops it once the job is re-fetched.
-    // SubmitAndWaitAsync deliberately never trusts the insert response's own status (a real BigQuery
-    // jobs.insert essentially never answers already DONE), so it always re-polls and never observes
-    // the failure here either: the materialize job looks like it succeeded, and the next step
-    // (tables.patch on the destination that CREATE_IF_NEEDED never actually created, because the
-    // query itself never ran) is what this emulator classifies -- HTTP 404 -> PZBQ0406, naming the
-    // destination table. What IS provable here is that a real failure still surfaces as a classified
-    // PzConnectorException naming the table this emulator's quirk left dangling, not a hang or an
-    // unclassified crash.
+    // emulator's own reason vocabulary can never produce it. What IS provable here is that a broken
+    // query still surfaces as a classified, purpose-naming PzConnectorException rather than a silent
+    // success or a hang.
     [SkippableFact]
-    public async Task Broken_query_is_reported_as_a_classified_failure_this_emulator_actually_produces()
+    public async Task Broken_query_is_reported_as_a_classified_failure_naming_the_materialize_step()
     {
         var spec = QuerySpec("select this is not valid sql {{{");
         await using var source = await OpenAsync();
@@ -196,8 +192,8 @@ public sealed class BqQueryModeTests
         var ex = await Assert.ThrowsAsync<PzConnectorException>(
             () => source.GetSchemaAsync(spec, CancellationToken.None).AsTask());
 
-        Assert.False(ex.IsTransient);
-        Assert.Contains("PZBQ0406", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("pz_query_", ex.Message, StringComparison.Ordinal);
+        Assert.True(ex.IsTransient);
+        Assert.Contains("PZBQ0402", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("materialize query", ex.Message, StringComparison.Ordinal);
     }
 }
