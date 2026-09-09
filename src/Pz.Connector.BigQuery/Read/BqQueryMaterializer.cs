@@ -17,8 +17,17 @@ namespace Pz.Connector.BigQuery;
 /// <c>Lazy&lt;T&gt;(LazyThreadSafetyMode.ExecutionAndPublication)</c> defers that submission until
 /// <c>.Value</c> is actually read, and only the one <see cref="Lazy{T}"/> instance <c>GetOrAdd</c>
 /// ends up publishing ever has its value factory run -- so exactly one job is submitted regardless of
-/// how many callers raced to get here. A faulted materialization is evicted from the cache on its way
-/// out so a later call (a retry, say) resubmits rather than replaying the same failure forever.</summary>
+/// how many callers raced to get here.
+///
+/// <para>The shared body runs on this instance's own lifetime token, never a caller's: two callers
+/// racing to materialize the same query carry two different <see cref="CancellationToken"/>s (the PCP
+/// host issues a fresh one per RPC), and cancelling one caller's own operation must not cancel or
+/// fault the materialization the other is still waiting on. Each caller instead layers its own token
+/// on top with <see cref="Task.WaitAsync(CancellationToken)"/>, so its own cancellation only ends its
+/// own wait. A materialization that itself faults (or is cancelled by this instance's own lifetime
+/// token, in <see cref="DisposeAsync"/>) is evicted from the cache so a later call -- a retry, say --
+/// resubmits rather than replaying the same failure forever; a caller whose own token merely stopped
+/// its own wait leaves the shared entry alone.</para></summary>
 internal sealed class BqQueryMaterializer : IAsyncDisposable
 {
     // Long enough to outlive a run that never gets to call DisposeAsync (a crash, a killed process) --
@@ -32,6 +41,19 @@ internal sealed class BqQueryMaterializer : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly ConcurrentDictionary<string, Lazy<Task<TableRef>>> _cache = new(StringComparer.Ordinal);
 
+    // Every destination this instance's query jobs have actually created, recorded the moment each
+    // one's query job reaches DONE -- before the expiration patch that follows. Tracked independently
+    // of _cache so a patch failure (a transient 5xx, a 403 on bigquery.tables.update) or a
+    // cancellation past that point still leaves DisposeAsync a record to drop the table by; _cache
+    // only ever answers "what is the table for this query text", not "what tables exist to clean up".
+    // A ConcurrentDictionary used as a set -- the value is never read.
+    private readonly ConcurrentDictionary<TableRef, byte> _created = new();
+
+    // Cancelled in DisposeAsync so a materialization still running when the instance is disposed
+    // (an abandoned run, a crash-adjacent shutdown) is not awaited forever; never a caller's own
+    // token -- see the type doc.
+    private readonly CancellationTokenSource _lifetime = new();
+
     public BqQueryMaterializer(BqRestClient rest, BqConnectionConfig cfg, TimeProvider time, ILogger logger)
     {
         _rest = rest;
@@ -44,37 +66,43 @@ internal sealed class BqQueryMaterializer : IAsyncDisposable
     {
         var key = query.Trim();
         var lazy = _cache.GetOrAdd(key,
-            _ => new Lazy<Task<TableRef>>(() => MaterializeCoreAsync(key, ct), LazyThreadSafetyMode.ExecutionAndPublication));
+            _ => new Lazy<Task<TableRef>>(() => MaterializeCoreAsync(key, _lifetime.Token), LazyThreadSafetyMode.ExecutionAndPublication));
         try
         {
-            return await lazy.Value.ConfigureAwait(false);
+            return await lazy.Value.WaitAsync(ct).ConfigureAwait(false);
         }
         catch
         {
-            // Only removes the exact faulted Lazy this call observed -- a racing caller that already
-            // replaced it with a fresh attempt (unlikely, but not impossible between the throw above
-            // and this catch) must not have its in-flight entry yanked out from under it.
-            _cache.TryRemove(new KeyValuePair<string, Lazy<Task<TableRef>>>(key, lazy));
+            // WaitAsync throws for two different reasons that must be told apart: this caller's own
+            // ct firing (the shared materialization is still running, or will still complete/fail for
+            // whichever other caller is also awaiting it -- the cache entry must stay), versus the
+            // shared task itself having faulted or been cancelled (by this instance's own lifetime
+            // token in DisposeAsync), which really is a dead entry that must not be replayed forever.
+            // Only removes the exact Lazy this call observed -- a racing caller that already replaced
+            // it with a fresh attempt (unlikely, but not impossible) must not have its in-flight entry
+            // yanked out from under it.
+            if (lazy.Value.IsFaulted || lazy.Value.IsCanceled)
+            {
+                _cache.TryRemove(new KeyValuePair<string, Lazy<Task<TableRef>>>(key, lazy));
+            }
+
             throw;
         }
     }
 
-    /// <summary>Drops every table this instance materialized -- a 404 (already gone) is tolerated by
+    /// <summary>Drops every table this instance's query jobs actually created, regardless of whether
+    /// its materialization went on to succeed -- a table recorded in the created-tables set is a table
+    /// that exists in BigQuery right now, full stop. A 404 (already gone) is tolerated by
     /// <see cref="BqRestClient.DeleteTableAsync"/> itself; any other failure is logged, never thrown,
     /// so a staging cleanup problem never masks the run's real outcome or blocks the source from
-    /// disposing. <see cref="Lazy{T}.IsValueCreated"/> guards against ever starting a materialization
-    /// here that no caller actually triggered -- reading <c>.Value</c> unconditionally would do
-    /// exactly that for any cache entry a racing <c>GetOrAdd</c> created but no caller reached yet.</summary>
+    /// disposing.</summary>
     public async ValueTask DisposeAsync()
     {
-        foreach (var (_, lazy) in _cache)
-        {
-            if (!lazy.IsValueCreated || !lazy.Value.IsCompletedSuccessfully)
-            {
-                continue;
-            }
+        await _lifetime.CancelAsync().ConfigureAwait(false);
+        _lifetime.Dispose();
 
-            var table = lazy.Value.Result;
+        foreach (var table in _created.Keys)
+        {
             try
             {
                 await _rest.DeleteTableAsync(table, CancellationToken.None).ConfigureAwait(false);
@@ -105,6 +133,11 @@ internal sealed class BqQueryMaterializer : IAsyncDisposable
         await BqJob.SubmitAndWaitAsync(_rest, destination.Project, job, "materialize query", _time, _logger, ct).ConfigureAwait(false);
         _logger.LogDebug("bigquery: materialized query into {Table} via job {JobId} in {ElapsedMs}ms",
             destination.Quoted, jobId, _time.GetElapsedTime(start).TotalMilliseconds);
+
+        // The table exists in BigQuery from this point on, no matter what happens next -- recorded
+        // before the expiration patch below so a failed or cancelled patch still leaves DisposeAsync a
+        // name to drop it by.
+        _created[destination] = 0;
 
         var expiresAt = _time.GetUtcNow() + Ttl;
         var patch = new BqTablePatch(ExpirationTime: expiresAt.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture));

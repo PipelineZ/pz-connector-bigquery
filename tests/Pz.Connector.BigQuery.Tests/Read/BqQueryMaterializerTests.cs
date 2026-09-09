@@ -83,6 +83,88 @@ public sealed class BqQueryMaterializerTests
     }
 
     [Fact]
+    public async Task A_failed_expiration_patch_still_lets_DisposeAsync_drop_the_destination_table()
+    {
+        var handler = new PatchFailingHandler();
+        var materializer = Materializer(handler);
+
+        await Assert.ThrowsAsync<PzConnectorException>(() => materializer.MaterializeAsync("select 1", CancellationToken.None));
+
+        // The table was created by the (successful) query job even though the patch that follows it
+        // failed -- DisposeAsync must still drop it, not skip it because the materialization as a
+        // whole never completed successfully.
+        await materializer.DisposeAsync();
+
+        var deleted = Assert.Single(handler.DeletedPaths);
+        Assert.StartsWith("/bigquery/v2/projects/p/datasets/stg/tables/pz_query_", deleted, StringComparison.Ordinal);
+    }
+
+    /// <summary>Always lands the query job as DONE (no error) so the destination table is genuinely
+    /// created, then fails every <c>tables.patch</c> -- proving Important-1's fix independently of
+    /// the job-failure path the other facts in this file already cover. <c>DELETE</c> is recorded and
+    /// answered successfully so the test can assert on it without a fixed path to route by (the
+    /// destination's name is a random GUID the materializer mints itself).</summary>
+    private sealed class PatchFailingHandler : HttpMessageHandler
+    {
+        public List<string> DeletedPaths { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                return Task.FromResult(Json(HttpStatusCode.OK,
+                    "{\"jobReference\":{\"projectId\":\"p\",\"jobId\":\"job1\"},\"status\":{\"state\":\"DONE\"}}"));
+            }
+
+            if (request.Method == HttpMethod.Patch)
+            {
+                return Task.FromResult(Json((HttpStatusCode)500,
+                    """{"error":{"code":500,"message":"boom","errors":[{"reason":"backendError"}]}}"""));
+            }
+
+            if (request.Method == HttpMethod.Delete)
+            {
+                DeletedPaths.Add(request.RequestUri!.AbsolutePath);
+                return Task.FromResult(Json(HttpStatusCode.OK, "{}"));
+            }
+
+            return Task.FromResult(Json(HttpStatusCode.NotFound, "{}"));
+        }
+
+        private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
+            new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+    }
+
+    [Fact]
+    public async Task Cancelling_one_callers_token_does_not_cancel_or_fault_a_sibling_callers_wait()
+    {
+        var handler = new GatedInsertHandler();
+        var materializer = Materializer(handler);
+        using var cts1 = new CancellationTokenSource();
+
+        var t1 = materializer.MaterializeAsync("select 1", cts1.Token);
+        var t2 = materializer.MaterializeAsync("select 1", CancellationToken.None);
+
+        // Both calls are in flight, sharing the one materialization, before either token is touched.
+        await handler.FirstRequestArrived;
+        Assert.False(t1.IsCompleted);
+        Assert.False(t2.IsCompleted);
+
+        cts1.Cancel();
+
+        // t1's own token fired -- it must observe cancellation, but the shared materialization
+        // neither this call started nor is entitled to cancel keeps running underneath for t2.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => t1);
+        Assert.False(t2.IsCompleted);
+
+        handler.ReleaseGate();
+        var table = await t2;
+
+        Assert.Equal(1, handler.InsertCalls);
+        Assert.Equal("stg", table.Dataset);
+    }
+
+    [Fact]
     public async Task Concurrent_materializations_of_the_same_query_submit_exactly_one_job()
     {
         var handler = new GatedInsertHandler();
