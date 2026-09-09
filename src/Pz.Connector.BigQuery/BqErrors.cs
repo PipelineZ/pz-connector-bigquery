@@ -37,37 +37,39 @@ internal static class BqErrors
     /// and <c>PermissionDenied</c> land on the 02xx read codes rather than the generic 04xx ones.</summary>
     public static PzConnectorException FromRpc(RpcException ex, BqRedactor redactor, string context)
     {
+        // Status.Detail carries no nullable annotation on Grpc.Core.Api's Status, and a status built
+        // with a null detail (as some interceptors and every default(Status) do) hands one back here.
         var detail = ex.Status.Detail;
         switch (ex.StatusCode)
         {
-            case StatusCode.InvalidArgument when detail.Contains("view", StringComparison.OrdinalIgnoreCase):
+            case StatusCode.InvalidArgument when detail?.Contains("view", StringComparison.OrdinalIgnoreCase) == true:
                 return NonTransient(BqCodes.Read_TableIsView, redactor,
-                    $"{context}: {detail} -- the Storage API cannot read views; use `query: select * from <view>` instead");
+                    $"{context}: {detail} -- the Storage API cannot read views; use `query: select * from <view>` instead", ex);
 
             case StatusCode.InvalidArgument:
-                return NonTransient(BqCodes.Remote_InvalidQuery, redactor, $"{context}: {detail}");
+                return NonTransient(BqCodes.Remote_InvalidQuery, redactor, $"{context}: {detail}", ex);
 
             case StatusCode.NotFound:
-                return NonTransient(BqCodes.Read_TableNotFound, redactor, $"{context}: {detail}");
+                return NonTransient(BqCodes.Read_TableNotFound, redactor, $"{context}: {detail}", ex);
 
             case StatusCode.PermissionDenied:
                 return NonTransient(BqCodes.Read_PermissionDenied, redactor,
                     $"{context}: {detail} -- needs bigquery.readsessions.create and bigquery.tables.getData "
-                    + "(roles/bigquery.dataViewer + roles/bigquery.readSessionUser)");
+                    + "(roles/bigquery.dataViewer + roles/bigquery.readSessionUser)", ex);
 
             case StatusCode.Unauthenticated:
                 return NonTransient(BqCodes.Remote_Unauthenticated, redactor,
-                    $"{context}: {detail} -- check the service-account key or Application Default Credentials");
+                    $"{context}: {detail} -- check the service-account key or Application Default Credentials", ex);
 
             // FailedPrecondition is how an expired read session surfaces: the session's deadline
             // passed server-side, and a fresh CreateReadSession call recovers it, so it is transient
             // exactly like the transport-level codes.
             case StatusCode.Unavailable or StatusCode.ResourceExhausted or StatusCode.DeadlineExceeded
                 or StatusCode.Aborted or StatusCode.Internal or StatusCode.Unknown or StatusCode.FailedPrecondition:
-                return Transient(BqCodes.Remote_GrpcTransient, redactor, $"{context}: {ex.StatusCode}: {detail}", retryAfter: null);
+                return Transient(BqCodes.Remote_GrpcTransient, redactor, $"{context}: {ex.StatusCode}: {detail}", retryAfter: null, ex);
 
             default:
-                return NonTransient(BqCodes.Remote_Other, redactor, $"{context}: {ex.StatusCode}: {detail}");
+                return NonTransient(BqCodes.Remote_Other, redactor, $"{context}: {ex.StatusCode}: {detail}", ex);
         }
     }
 
@@ -85,7 +87,7 @@ internal static class BqErrors
                 + "-- the caller rethrows cancellation unwrapped.", ex);
         }
 
-        return Transient(BqCodes.Remote_Transient, redactor, $"{context}: {ex.Message}", retryAfter: null);
+        return Transient(BqCodes.Remote_Transient, redactor, $"{context}: {ex.Message}", retryAfter: null, ex);
     }
 
     private static PzConnectorException Classify(int status, string? reason, string? message, TimeSpan? retryAfter,
@@ -147,9 +149,12 @@ internal static class BqErrors
         };
     }
 
-    private static PzConnectorException Transient(string code, BqRedactor redactor, string text, TimeSpan? retryAfter) =>
-        new(BqCodes.Message(code, redactor, text), isTransient: true, retryAfter: retryAfter);
+    // innerException defaults to null for the REST/job-error paths, which classify a parsed error
+    // envelope rather than an in-flight exception; FromRpc and Wrap pass the exception they caught.
+    private static PzConnectorException Transient(string code, BqRedactor redactor, string text, TimeSpan? retryAfter,
+        Exception? innerException = null) =>
+        new(BqCodes.Message(code, redactor, text), isTransient: true, retryAfter: retryAfter, innerException: innerException);
 
-    private static PzConnectorException NonTransient(string code, BqRedactor redactor, string text) =>
-        new(BqCodes.Message(code, redactor, text), isTransient: false);
+    private static PzConnectorException NonTransient(string code, BqRedactor redactor, string text, Exception? innerException = null) =>
+        new(BqCodes.Message(code, redactor, text), isTransient: false, innerException: innerException);
 }

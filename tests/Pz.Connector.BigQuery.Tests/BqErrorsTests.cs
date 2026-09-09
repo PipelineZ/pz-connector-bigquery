@@ -124,57 +124,93 @@ public sealed class BqErrorsTests
     [Fact]
     public void FromRpc_invalid_argument_naming_a_view_hints_the_query_workaround()
     {
-        var ex = BqErrors.FromRpc(new RpcException(new Status(StatusCode.InvalidArgument, "table 'x' is a VIEW, not queryable via Storage API")),
-            BqRedactor.None, "reading 'x'");
+        var original = new RpcException(new Status(StatusCode.InvalidArgument, "table 'x' is a VIEW, not queryable via Storage API"));
+        var ex = BqErrors.FromRpc(original, BqRedactor.None, "reading 'x'");
 
         Assert.False(ex.IsTransient);
         Assert.StartsWith("bigquery: PZBQ0204: ", ex.Message);
         Assert.Contains("query:", ex.Message);
+        Assert.Same(original, ex.InnerException);
     }
 
     [Fact]
     public void FromRpc_other_invalid_argument_is_the_generic_invalid_query_code()
     {
-        var ex = BqErrors.FromRpc(new RpcException(new Status(StatusCode.InvalidArgument, "bad filter")), BqRedactor.None, "ctx");
+        var original = new RpcException(new Status(StatusCode.InvalidArgument, "bad filter"));
+        var ex = BqErrors.FromRpc(original, BqRedactor.None, "ctx");
 
         Assert.False(ex.IsTransient);
         Assert.StartsWith("bigquery: PZBQ0407: ", ex.Message);
+        Assert.Same(original, ex.InnerException);
+    }
+
+    [Fact]
+    public void FromRpc_invalid_argument_with_a_null_detail_does_not_throw_and_falls_back_to_invalid_query()
+    {
+        // Status.Detail carries no nullable annotation; a status built with a null detail (a bare
+        // default(Status), or an interceptor that never set one) must not crash the "is this a view"
+        // guard, which used to call .Contains directly on a possibly-null string.
+        var original = new RpcException(new Status(StatusCode.InvalidArgument, null!));
+        var ex = BqErrors.FromRpc(original, BqRedactor.None, "ctx");
+
+        Assert.False(ex.IsTransient);
+        Assert.StartsWith("bigquery: PZBQ0407: ", ex.Message);
+        Assert.Same(original, ex.InnerException);
+    }
+
+    [Fact]
+    public void FromRpc_transient_status_with_a_null_detail_does_not_throw()
+    {
+        var original = new RpcException(new Status(StatusCode.Unavailable, null!));
+        var ex = BqErrors.FromRpc(original, BqRedactor.None, "ctx");
+
+        Assert.True(ex.IsTransient);
+        Assert.StartsWith("bigquery: PZBQ0408: ", ex.Message);
+        Assert.Same(original, ex.InnerException);
     }
 
     [Fact]
     public void FromRpc_not_found_is_the_read_table_not_found_code()
     {
-        var ex = BqErrors.FromRpc(new RpcException(new Status(StatusCode.NotFound, "no such table")), BqRedactor.None, "ctx");
+        var original = new RpcException(new Status(StatusCode.NotFound, "no such table"));
+        var ex = BqErrors.FromRpc(original, BqRedactor.None, "ctx");
 
         Assert.StartsWith("bigquery: PZBQ0205: ", ex.Message);
+        Assert.Same(original, ex.InnerException);
     }
 
     [Fact]
     public void FromRpc_permission_denied_names_the_read_session_permissions()
     {
-        var ex = BqErrors.FromRpc(new RpcException(new Status(StatusCode.PermissionDenied, "denied")), BqRedactor.None, "ctx");
+        var original = new RpcException(new Status(StatusCode.PermissionDenied, "denied"));
+        var ex = BqErrors.FromRpc(original, BqRedactor.None, "ctx");
 
         Assert.StartsWith("bigquery: PZBQ0206: ", ex.Message);
         Assert.Contains("bigquery.readsessions.create", ex.Message);
+        Assert.Same(original, ex.InnerException);
     }
 
     [Fact]
     public void FromRpc_unauthenticated_is_the_remote_unauthenticated_code()
     {
-        var ex = BqErrors.FromRpc(new RpcException(new Status(StatusCode.Unauthenticated, "no token")), BqRedactor.None, "ctx");
+        var original = new RpcException(new Status(StatusCode.Unauthenticated, "no token"));
+        var ex = BqErrors.FromRpc(original, BqRedactor.None, "ctx");
 
         Assert.False(ex.IsTransient);
         Assert.StartsWith("bigquery: PZBQ0404: ", ex.Message);
+        Assert.Same(original, ex.InnerException);
     }
 
     [Fact]
     public void Wrap_transport_failure_is_transient()
     {
-        var ex = BqErrors.Wrap(new HttpRequestException("refused"), BqRedactor.None, "ctx");
+        var original = new HttpRequestException("refused");
+        var ex = BqErrors.Wrap(original, BqRedactor.None, "ctx");
 
         Assert.True(ex.IsTransient);
         Assert.StartsWith("bigquery: PZBQ0401: ", ex.Message);
         Assert.Contains("refused", ex.Message);
+        Assert.Same(original, ex.InnerException);
     }
 
     [Fact]
