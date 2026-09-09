@@ -106,7 +106,18 @@ internal sealed class BqSource : ISource
     /// <c>tables.get</c>: the Storage Read API refuses to read a view with that status, but its error
     /// detail text is not something this connector controls or trusts across BigQuery and every
     /// emulator that speaks its protocol, so the view/not-view distinction is made by asking the REST
-    /// API what the resource actually is instead of pattern-matching a message.</summary>
+    /// API what the resource actually is instead of pattern-matching a message.
+    ///
+    /// <para><c>tables.get</c>, not <see cref="BqErrors.FromRpc"/>'s own text heuristic, is the sole
+    /// authority for <c>PZBQ0204</c> here. <see cref="BqReadSessionFactory.CreateAsync"/> has already
+    /// run every <c>InvalidArgument</c> through <see cref="BqErrors.FromRpc"/> (needed so any OTHER
+    /// status still gets that method's classification), and that heuristic may have already guessed
+    /// "view" from a coincidental substring in the gRPC detail text -- so <paramref name="ex"/> itself
+    /// must never be rethrown as-is once <c>tables.get</c> has run: when it confirms a view, a fresh
+    /// <c>PZBQ0204</c> is built (replacing whatever <paramref name="ex"/> already said); when it does
+    /// not, the classification is rebuilt from the raw <see cref="RpcException"/> via
+    /// <see cref="BqErrors.GenericInvalidArgument"/>, discarding <paramref name="ex"/>'s possibly
+    /// mis-tagged code rather than trusting it.</para></summary>
     private async Task<BqSessionInfo> CreateSessionAsync(
         TableRef table, IReadOnlyList<string>? columns, string? restriction, int maxStreams, CancellationToken ct)
     {
@@ -114,19 +125,19 @@ internal sealed class BqSource : ISource
         {
             return await _factory.CreateAsync(table, columns, restriction, maxStreams, ct).ConfigureAwait(false);
         }
-        catch (PzConnectorException ex) when (ex.InnerException is RpcException { StatusCode: StatusCode.InvalidArgument })
+        catch (PzConnectorException ex) when (ex.InnerException is RpcException { StatusCode: StatusCode.InvalidArgument } rpc)
         {
+            var context = $"reading {table.Dataset}.{table.Table}";
             var meta = await _rest.GetTableAsync(table, ct).ConfigureAwait(false);
             if (meta?.Type == "VIEW")
             {
                 throw new PzConnectorException(
                     BqCodes.Message(BqCodes.Read_TableIsView, _redactor,
-                        $"reading {table.Dataset}.{table.Table}: the Storage Read API cannot read views -- "
-                        + $"use `query: select * from {table.Quoted}` instead"),
-                    isTransient: false, innerException: ex);
+                        $"{context}: the Storage Read API cannot read views -- use `query: select * from {table.Quoted}` instead"),
+                    isTransient: false, innerException: rpc);
             }
 
-            throw;
+            throw BqErrors.GenericInvalidArgument(rpc, _redactor, context);
         }
     }
 }

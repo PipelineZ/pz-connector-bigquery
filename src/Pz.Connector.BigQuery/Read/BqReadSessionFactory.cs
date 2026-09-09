@@ -14,8 +14,13 @@ internal sealed record BqSessionInfo(ReadOnlyMemory<byte> SerializedSchema, IRea
 /// it: creating a session (one call per <see cref="ISource.PlanReadAsync"/>/<see cref="ISource.GetSchemaAsync"/>
 /// resolution) and streaming one of its streams' rows. The client is built lazily -- constructing
 /// one dials nothing by itself, but doing it eagerly in the constructor would mean every
-/// <see cref="BqSource"/> open pays gRPC channel setup even for a run that never actually reads.</summary>
-internal sealed class BqReadSessionFactory(BqConnectionConfig cfg, GoogleCredential? cred, BqRedactor r)
+/// <see cref="BqSource"/> open pays gRPC channel setup even for a run that never actually reads.
+///
+/// <para>Not sealed, and <see cref="CreateAsync"/> is <c>virtual</c>, solely so an offline unit test
+/// can substitute a subclass that returns a canned failure without dialing a real (or emulated)
+/// Storage Read API -- there is no other extension point in production, and no other member is
+/// virtual.</para></summary>
+internal class BqReadSessionFactory(BqConnectionConfig cfg, GoogleCredential? cred, BqRedactor r)
 {
     private readonly SemaphoreSlim _clientLock = new(1, 1);
     private BigQueryReadClient? _client;
@@ -66,7 +71,7 @@ internal sealed class BqReadSessionFactory(BqConnectionConfig cfg, GoogleCredent
     /// where the caller reads nothing from any stream. A failure here is always the whole call
     /// failing before any row is read, so it is classified and thrown eagerly rather than left for a
     /// caller to discover mid-enumeration the way <see cref="ReadRowsAsync"/>'s failures are.</summary>
-    public async Task<BqSessionInfo> CreateAsync(
+    public virtual async Task<BqSessionInfo> CreateAsync(
         TableRef table, IReadOnlyList<string>? columns, string? restriction, int maxStreams, CancellationToken ct)
     {
         var client = await ClientAsync(ct).ConfigureAwait(false);

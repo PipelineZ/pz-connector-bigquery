@@ -73,6 +73,18 @@ internal static class BqErrors
         }
     }
 
+    /// <summary>The classification <see cref="FromRpc"/>'s plain <c>InvalidArgument</c> arm would have
+    /// produced if its own "does the detail text mention 'view'" heuristic (line 45 above) had not
+    /// matched. A caller that has already disproved the heuristic's guess through an authoritative
+    /// check (<c>tables.get</c>'s own <c>Type</c> field, say) uses this to rebuild the right
+    /// classification from the raw <see cref="RpcException"/> rather than trust whatever <see cref="FromRpc"/>
+    /// already returned -- the heuristic can misfire on a coincidental substring, and once that
+    /// happens the exception it already produced is mis-tagged and must not be handed to the caller
+    /// unchanged just because the authoritative check ran too late to stop <see cref="FromRpc"/> from
+    /// being called in the first place.</summary>
+    public static PzConnectorException GenericInvalidArgument(RpcException ex, BqRedactor redactor, string context) =>
+        NonTransient(BqCodes.Remote_InvalidQuery, redactor, $"{context}: {ex.Status.Detail}", ex);
+
     /// <summary>A client-side failure before any BigQuery response arrived at all -- DNS, refused
     /// connection, TLS handshake, a client-side timeout. <paramref name="ex"/> must not be an
     /// <see cref="OperationCanceledException"/>: the engine's own cancellation is the caller's to
