@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using Google.Apis.Auth.OAuth2;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -79,7 +80,7 @@ public sealed class BqRestClientTests
         var handler = new FakeHandler();
         handler.Add(HttpMethod.Get, "/bigquery/v2/projects/p/datasets/d/tables/t", 200, TableJson);
 
-        var withCred = Client(handler, cred: GoogleCredential.FromAccessToken("tok"));
+        var withCred = Client(handler, cred: GoogleCredential.FromAccessToken("tok"), redactor: new BqRedactor([]));
         await withCred.GetTableAsync(new TableRef("p", "d", "t"), CancellationToken.None);
         Assert.Equal("Bearer tok", handler.Requests[0].Headers["Authorization"]);
 
@@ -215,6 +216,29 @@ public sealed class BqRestClientTests
         Assert.Equal(HttpMethod.Put, put.Method);
         Assert.Equal("http://fake-upload/session/abc", put.Url.ToString());
         Assert.Equal("row1\nrow2\n", put.Body);
+        Assert.Equal("application/octet-stream", put.Headers["Content-Type"]);
+    }
+
+    [Fact]
+    public async Task UploadLoadJobAsync_does_not_dispose_the_callers_stream()
+    {
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Post, "/upload/bigquery/v2/projects/p/jobs?uploadType=resumable", 200, "ignored",
+            new Dictionary<string, string> { ["Location"] = "http://fake-upload/session/abc" });
+        handler.Add(HttpMethod.Put, "/session/abc", 200, JobJson("job1", "DONE"));
+        var client = Client(handler);
+        var job = new BqJob(new BqJobReference("p", "job1", null), null, null);
+        var bytes = Encoding.UTF8.GetBytes("row1\nrow2\n");
+        var content = new RecordingStream(new MemoryStream(bytes));
+
+        await client.UploadLoadJobAsync("p", job, content, bytes.Length, CancellationToken.None);
+
+        // An engine-driven retry re-reads the same stream from the start -- proving that requires
+        // more than "Dispose was never called": the stream must still actually be usable afterward.
+        Assert.False(content.WasDisposed);
+        content.Position = 0;
+        using var reader = new StreamReader(content);
+        Assert.Equal("row1\nrow2\n", await reader.ReadToEndAsync());
     }
 
     [Fact]
@@ -277,6 +301,65 @@ public sealed class BqRestClientTests
             () => client.GetTableAsync(new TableRef("p", "d", "t"), cts.Token));
     }
 
+    [Fact]
+    public async Task A_transport_exception_while_reading_the_response_body_wraps_as_transient_PZBQ0401()
+    {
+        // HttpCompletionOption.ResponseHeadersRead means the body is not actually pulled off the
+        // wire until BqRestClient reads it -- a connection dropped mid-body must classify the same
+        // way a connection refused up front does, not escape as a raw IOException.
+        var client = new BqRestClient(new HttpClient(new ThrowingBodyHandler()), Config(), null, BqRedactor.None, NullLogger.Instance);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            () => client.GetTableAsync(new TableRef("p", "d", "t"), CancellationToken.None));
+
+        Assert.True(ex.IsTransient);
+        Assert.Contains("PZBQ0401", ex.Message);
+    }
+
+    [Fact]
+    public async Task Token_acquisition_failure_classifies_as_PZBQ0404_non_transient()
+    {
+        var thrown = new InvalidOperationException("secret-echo");
+        var client = new BqRestClient(new HttpClient(new FakeHandler()), Config(), BqRedactor.None, NullLogger.Instance,
+            _ => throw thrown);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            () => client.GetTableAsync(new TableRef("p", "d", "t"), CancellationToken.None));
+
+        Assert.False(ex.IsTransient);
+        Assert.Contains("PZBQ0404", ex.Message);
+        Assert.Same(thrown, ex.InnerException);
+    }
+
+    [Fact]
+    public async Task Retry_After_delta_seconds_is_carried_onto_the_exception()
+    {
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Get, "/bigquery/v2/projects/p/datasets/d/tables/t", 429,
+            """{"error":{"code":429,"message":"slow down","errors":[{"reason":"rateLimitExceeded"}]}}""",
+            new Dictionary<string, string> { ["Retry-After"] = "5" });
+        var client = Client(handler);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            () => client.GetTableAsync(new TableRef("p", "d", "t"), CancellationToken.None));
+
+        Assert.True(ex.IsTransient);
+        Assert.Equal(TimeSpan.FromSeconds(5), ex.RetryAfter);
+    }
+
+    [Fact]
+    public async Task GetJobAsync_with_a_null_location_omits_the_location_query_parameter()
+    {
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Get, "/bigquery/v2/projects/p/jobs/job1", 200, JobJson("job1", "DONE"));
+        var client = Client(handler);
+
+        var result = await client.GetJobAsync("p", "job1", null, CancellationToken.None);
+
+        Assert.Equal("DONE", result.Status?.State);
+        Assert.Equal("/bigquery/v2/projects/p/jobs/job1", handler.Requests[0].Url.PathAndQuery);
+    }
+
     /// <summary>Throws <paramref name="exception"/> instead of producing a response -- exercises
     /// <c>BqRestClient</c>'s transport-failure classification, which <see cref="FakeHandler"/> (a
     /// route table over real responses) has no way to reach.</summary>
@@ -284,6 +367,63 @@ public sealed class BqRestClientTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
             throw exception;
+    }
+
+    /// <summary>Answers with headers but a body whose read always fails -- the only way to exercise
+    /// a transport failure that happens strictly after <c>HttpClient.SendAsync</c> itself returns.</summary>
+    private sealed class ThrowingBodyHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ThrowingContent() });
+    }
+
+    private sealed class ThrowingContent : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            throw new IOException("connection reset while reading the body");
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
+    /// <summary>Wraps a stream and records whether <c>Dispose</c> was called on it, without ever
+    /// disposing the wrapped stream itself -- lets a test prove both that the method under test
+    /// never disposed it AND that the stream is still genuinely usable afterward.</summary>
+    private sealed class RecordingStream(Stream inner) : Stream
+    {
+        public bool WasDisposed { get; private set; }
+
+        public override bool CanRead => inner.CanRead;
+
+        public override bool CanSeek => inner.CanSeek;
+
+        public override bool CanWrite => inner.CanWrite;
+
+        public override long Length => inner.Length;
+
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public override void Flush() => inner.Flush();
+
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void SetLength(long value) => inner.SetLength(value);
+
+        public override void Write(byte[] buffer, int offset, int count) => inner.Write(buffer, offset, count);
+
+        protected override void Dispose(bool disposing)
+        {
+            WasDisposed = true;
+        }
     }
 
     private static string JobJson(string jobId, string state, string? location = null, string? errorReason = null, string? errorMessage = null)

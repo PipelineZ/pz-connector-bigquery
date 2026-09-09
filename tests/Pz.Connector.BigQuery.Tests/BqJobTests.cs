@@ -29,27 +29,39 @@ public sealed class BqJobTests
         var time = new FakeTimeProvider();
         var handler = new SequenceHandler(
             insertBody: JobJson("job1", "PENDING"),
-            getBodies: [JobJson("job1", "RUNNING"), JobJson("job1", "RUNNING"), JobJson("job1", "DONE")],
-            time: time);
-        var client = BqRestClientTests_Client(handler);
+            getBodies: [JobJson("job1", "RUNNING"), JobJson("job1", "RUNNING"), JobJson("job1", "DONE")]);
+        var client = Client(handler);
         var job = new BqJob(new BqJobReference("p", "job1", null), null, null);
 
         var resultTask = BqJob.SubmitAndWaitAsync(client, "p", job, "loading into staging", time, NullLogger.Instance, CancellationToken.None);
 
-        await WaitUntilAsync(() => handler.GetCalls == 1);
+        // call #1: no delay before it -- awaits the handler's own signal (a real gate, not a
+        // wall-clock poll) that the response has been served.
+        await handler.WaitForGetAsync(1);
         Assert.Equal(1, handler.InsertCalls);
 
-        time.Advance(TimeSpan.FromMilliseconds(250));
-        await WaitUntilAsync(() => handler.GetCalls == 2);
+        // The 250 ms delay before call #2: prove BOTH edges, not just "enough time eventually
+        // passed" -- 249 ms must NOT be enough (a too-short delay in the production code would
+        // still pass a test that only checked the positive edge), and the next 1 ms must be.
+        time.Advance(TimeSpan.FromMilliseconds(249));
+        await LetPendingContinuationsRunAsync();
+        Assert.Equal(1, handler.GetCalls);
 
-        time.Advance(TimeSpan.FromMilliseconds(500));
-        await WaitUntilAsync(() => handler.GetCalls == 3);
+        time.Advance(TimeSpan.FromMilliseconds(1));
+        await handler.WaitForGetAsync(2);
+
+        // The 500 ms delay before call #3: same two-edge proof.
+        time.Advance(TimeSpan.FromMilliseconds(499));
+        await LetPendingContinuationsRunAsync();
+        Assert.Equal(2, handler.GetCalls);
+
+        time.Advance(TimeSpan.FromMilliseconds(1));
+        await handler.WaitForGetAsync(3);
 
         var result = await resultTask;
 
         Assert.Equal("DONE", result.Status?.State);
         Assert.Equal(3, handler.GetCalls);
-        Assert.Equal(new[] { TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(500) }, handler.ObservedDelays);
     }
 
     [Fact]
@@ -58,9 +70,8 @@ public sealed class BqJobTests
         var time = new FakeTimeProvider();
         var handler = new SequenceHandler(
             insertBody: JobJson("job1", "PENDING"),
-            getBodies: [JobJson("job1", "DONE", errorReason: "invalidQuery", errorMessage: "Syntax error")],
-            time: time);
-        var client = BqRestClientTests_Client(handler);
+            getBodies: [JobJson("job1", "DONE", errorReason: "invalidQuery", errorMessage: "Syntax error")]);
+        var client = Client(handler);
         var job = new BqJob(new BqJobReference("p", "job1", null), null, null);
 
         var ex = await Assert.ThrowsAsync<PzConnectorException>(
@@ -69,6 +80,25 @@ public sealed class BqJobTests
         Assert.False(ex.IsTransient);
         Assert.Contains("PZBQ0407", ex.Message);
         Assert.Contains("compiling pipeline", ex.Message);
+    }
+
+    [Fact]
+    public async Task SubmitAndWaitAsync_falls_back_to_the_submitted_jobs_location_when_the_insert_response_omits_it()
+    {
+        // The insert response below carries no jobReference.location at all; the submitted job
+        // carries "EU". Every jobs.get call must still be addressed to ?location=EU -- a FakeHandler
+        // route keyed on that exact query string is what makes a wrong (or missing) location show up
+        // as a 404-turned-PZBQ0406 instead of silently passing.
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Post, "/bigquery/v2/projects/p/jobs", 200, JobJson("job1", "PENDING"));
+        handler.Add(HttpMethod.Get, "/bigquery/v2/projects/p/jobs/job1?location=EU", 200, JobJson("job1", "DONE"));
+        var client = Client(handler);
+        var job = new BqJob(new BqJobReference("p", "job1", "EU"), null, null);
+        var time = new FakeTimeProvider();
+
+        var result = await BqJob.SubmitAndWaitAsync(client, "p", job, "loading", time, NullLogger.Instance, CancellationToken.None);
+
+        Assert.Equal("DONE", result.Status?.State);
     }
 
     [Fact]
@@ -110,7 +140,7 @@ public sealed class BqJobTests
         Assert.Equal("EU", job.JobReference?.Location);
     }
 
-    private static BqRestClient BqRestClientTests_Client(HttpMessageHandler handler)
+    private static BqRestClient Client(HttpMessageHandler handler)
     {
         var errors = new List<string>();
         var config = BqConnectionConfig.Parse(new ConnectorConfig(new Dictionary<string, object?>
@@ -123,20 +153,15 @@ public sealed class BqJobTests
         return new BqRestClient(new HttpClient(handler), config, null, BqRedactor.None, NullLogger.Instance);
     }
 
-    private static async Task WaitUntilAsync(Func<bool> condition)
+    /// <summary>Gives every continuation already queued on the thread pool a chance to run, without
+    /// waiting on real wall-clock time -- used only to prove a NEGATIVE ("nothing happened yet"),
+    /// never to wait for something that is expected to happen (that always goes through a real
+    /// signal, e.g. <see cref="SequenceHandler.WaitForGetAsync"/>).</summary>
+    private static async Task LetPendingContinuationsRunAsync()
     {
-        // FakeTimeProvider.Advance runs due timer callbacks inline, but the awaiting continuation
-        // (the next loop iteration's GetJobAsync call) still needs a thread-pool hop to resume --
-        // this polls for that, bounded, rather than asserting on a race.
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (!condition())
+        for (var i = 0; i < 50; i++)
         {
-            if (DateTime.UtcNow > deadline)
-            {
-                throw new TimeoutException("condition did not become true in time");
-            }
-
-            await Task.Delay(5);
+            await Task.Yield();
         }
     }
 
@@ -162,20 +187,30 @@ public sealed class BqJobTests
 
     /// <summary>A minimal call-counting handler for the polling tests: <c>jobs.insert</c> (POST)
     /// always answers with <paramref name="insertBody"/>; each <c>jobs.get</c> (GET) answers with the
-    /// next body in <paramref name="getBodies"/> (the last one repeats once exhausted). Records the
-    /// gap between successive GET calls on <paramref name="time"/> -- the same <see cref="TimeProvider"/>
-    /// the polling loop's own <c>Task.Delay</c> advances against -- so the test asserts the backoff
-    /// schedule the production code actually awaited, not a real-wall-clock approximation of it.</summary>
-    private sealed class SequenceHandler(string insertBody, IReadOnlyList<string> getBodies, TimeProvider time) : HttpMessageHandler
+    /// next body in <paramref name="getBodies"/> (the last one repeats once exhausted).
+    /// <see cref="WaitForGetAsync"/> is the deterministic alternative to polling <see cref="GetCalls"/>
+    /// on a wall-clock timer: it completes exactly when the handler has served the Nth GET, however
+    /// many scheduling hops that took.</summary>
+    private sealed class SequenceHandler(string insertBody, IReadOnlyList<string> getBodies) : HttpMessageHandler
     {
         private readonly Queue<string> _getBodies = new(getBodies);
-        private DateTimeOffset? _lastGetAt;
+        private readonly List<TaskCompletionSource> _getServed = [];
+        private readonly Lock _gate = new();
 
         public int InsertCalls { get; private set; }
 
         public int GetCalls { get; private set; }
 
-        public List<TimeSpan> ObservedDelays { get; } = [];
+        /// <summary>Completes once the Nth GET call has been served. May be called before that call
+        /// happens (the wait is registered up front and signaled later) or after (it is already
+        /// signaled, so the await returns immediately).</summary>
+        public Task WaitForGetAsync(int n)
+        {
+            lock (_gate)
+            {
+                return TcsFor(n).Task;
+            }
+        }
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -185,17 +220,25 @@ public sealed class BqJobTests
                 return Task.FromResult(Respond(insertBody));
             }
 
-            GetCalls++;
-            var now = time.GetUtcNow();
-            if (_lastGetAt is { } last)
+            lock (_gate)
             {
-                ObservedDelays.Add(now - last);
+                GetCalls++;
+                TcsFor(GetCalls).TrySetResult();
             }
-
-            _lastGetAt = now;
 
             var body = _getBodies.Count > 1 ? _getBodies.Dequeue() : _getBodies.Peek();
             return Task.FromResult(Respond(body));
+        }
+
+        // Must be called with _gate held.
+        private TaskCompletionSource TcsFor(int n)
+        {
+            while (_getServed.Count < n)
+            {
+                _getServed.Add(new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+            }
+
+            return _getServed[n - 1];
         }
 
         private static HttpResponseMessage Respond(string body) =>

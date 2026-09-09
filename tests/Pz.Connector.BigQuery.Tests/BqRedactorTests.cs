@@ -27,6 +27,18 @@ public sealed class BqRedactorTests
     }
 
     [Fact]
+    public void AddSecret_on_None_is_a_no_op()
+    {
+        // None is one process-wide shared instance -- if AddSecret mutated it, one test's or one
+        // request's token would leak into every other caller that also uses BqRedactor.None.
+        // "secret-xyz" (>= 3 chars) so this cannot pass merely because Sorted() would have dropped
+        // a too-short secret anyway.
+        BqRedactor.None.AddSecret("secret-xyz");
+
+        Assert.Equal("holds secret-xyz here", BqRedactor.None.Redact("holds secret-xyz here"));
+    }
+
+    [Fact]
     public void Masks_a_registered_key_json_blob_wherever_it_is_echoed()
     {
         var keyJson = """{"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----\n"}""";

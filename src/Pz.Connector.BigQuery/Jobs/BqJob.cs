@@ -32,7 +32,10 @@ internal sealed partial record BqJob
         var inserted = await rest.InsertJobAsync(project, job, ct).ConfigureAwait(false);
         var jobId = inserted.JobReference?.JobId
             ?? throw new InvalidOperationException("the inserted job carries no jobReference.jobId to poll");
-        var location = inserted.JobReference?.Location;
+        // The insert response usually echoes jobReference.location back, but is not guaranteed to
+        // -- falling back to the location the caller submitted keeps every jobs.get call addressed
+        // to the same region the job actually runs in.
+        var location = inserted.JobReference?.Location ?? job.JobReference?.Location;
 
         var current = await rest.GetJobAsync(project, jobId, location, ct).ConfigureAwait(false);
         var delayIndex = 0;

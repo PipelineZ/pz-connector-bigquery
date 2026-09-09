@@ -12,6 +12,14 @@ namespace Pz.Connector.BigQuery;
 /// re-composed against <c>RestBase</c>.</summary>
 internal sealed partial class BqRestClient
 {
+    /// <summary>Uploads <paramref name="content"/> as the load job's data. The caller keeps
+    /// ownership of <paramref name="content"/> -- this method never disposes it, so an engine-driven
+    /// retry of the same upload can rewind and re-read the same stream. That is why the
+    /// <see cref="StreamContent"/> and the <see cref="HttpRequestMessage"/> wrapping it are
+    /// deliberately never disposed here: <see cref="HttpContent"/>.Dispose() disposes whatever
+    /// stream it wraps, and an <see cref="HttpRequestMessage"/>'s own Dispose cascades into its
+    /// Content -- either one disposing would reach the caller's stream. Neither type holds an
+    /// unmanaged resource of its own worth releasing once the request has been sent.</summary>
     public async Task<BqJob> UploadLoadJobAsync(string project, BqJob job, Stream content, long length, CancellationToken ct)
     {
         var jobId = job.JobReference?.JobId ?? throw new ArgumentException("job.JobReference.JobId is required", nameof(job));
@@ -26,14 +34,14 @@ internal sealed partial class BqRestClient
 
         var location = await InitiateResumableUploadAsync(initiatePath, json, initiateHeaders, context, ct).ConfigureAwait(false);
 
-        using var request = new HttpRequestMessage(HttpMethod.Put, location);
-        using var streamContent = new StreamContent(content);
+        var request = new HttpRequestMessage(HttpMethod.Put, location);
+        var streamContent = new StreamContent(content);
         streamContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         streamContent.Headers.ContentLength = length;
         request.Content = streamContent;
 
         using var putResponse = await SendCoreAsync(request, context, ct).ConfigureAwait(false);
-        var putBody = await putResponse.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var putBody = await ReadBodyAsync(putResponse, context, ct).ConfigureAwait(false);
         if ((int)putResponse.StatusCode is < 200 or >= 300)
         {
             var (reason, message) = ParseError(putBody, putResponse.ReasonPhrase);
@@ -49,7 +57,7 @@ internal sealed partial class BqRestClient
         using var response = await SendRawAsync(HttpMethod.Post, initiatePath, json, headers, context, ct).ConfigureAwait(false);
         if ((int)response.StatusCode is < 200 or >= 300)
         {
-            var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            var body = await ReadBodyAsync(response, context, ct).ConfigureAwait(false);
             var (reason, message) = ParseError(body, response.ReasonPhrase);
             throw BqErrors.FromRest((int)response.StatusCode, reason, message, RetryAfterOf(response), r, context);
         }

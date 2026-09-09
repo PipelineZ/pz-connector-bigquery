@@ -28,9 +28,17 @@ internal sealed partial class BqRedactor
     }
 
     /// <summary>Registers a secret minted after construction -- an OAuth access token fetched
-    /// mid-run, say. Thread-safe: concurrent callers may mint and register tokens at once.</summary>
+    /// mid-run, say. Thread-safe: concurrent callers may mint and register tokens at once. A no-op
+    /// on <see cref="None"/>, which every caller not wired up with a real redactor (most tests,
+    /// notably) shares as one process-wide instance -- letting it accumulate secrets would leak
+    /// state between unrelated tests and requests.</summary>
     public void AddSecret(string secret)
     {
+        if (ReferenceEquals(this, None))
+        {
+            return;
+        }
+
         lock (_gate)
         {
             _secrets = Sorted([secret], _secrets);

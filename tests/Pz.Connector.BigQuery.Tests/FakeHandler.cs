@@ -25,6 +25,16 @@ internal sealed class FakeHandler : HttpMessageHandler
         var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         var headers = request.Headers
             .ToDictionary(h => h.Key, h => string.Join(", ", h.Value), StringComparer.OrdinalIgnoreCase);
+        if (request.Content is not null)
+        {
+            // Content-Type/Content-Length live on HttpContent.Headers, not HttpRequestMessage.Headers
+            // -- merged in so a test can assert on either without knowing which bucket .NET put it in.
+            foreach (var header in request.Content.Headers)
+            {
+                headers[header.Key] = string.Join(", ", header.Value);
+            }
+        }
+
         var url = request.RequestUri ?? throw new InvalidOperationException("request has no RequestUri");
         Requests.Add(new Recorded(request.Method, url, headers, body));
 

@@ -16,9 +16,35 @@ namespace Pz.Connector.BigQuery;
 /// leading-slash path clobbers a path-bearing base URL's own path on <see cref="Uri"/> composition
 /// instead of extending it). The resumable-upload handshake lives in <c>BqUpload.cs</c>, a second
 /// partial of this same type, to keep this file to the metadata/job-status calls.</summary>
-internal sealed partial class BqRestClient(HttpClient http, BqConnectionConfig cfg, GoogleCredential? cred, BqRedactor r, ILogger logger)
+internal sealed partial class BqRestClient
 {
     private const string JsonContentType = "application/json; charset=UTF-8";
+
+    private readonly HttpClient http;
+    private readonly BqConnectionConfig cfg;
+    private readonly BqRedactor r;
+    private readonly ILogger logger;
+    private readonly Func<CancellationToken, Task<string?>> tokenSource;
+
+    public BqRestClient(HttpClient http, BqConnectionConfig cfg, GoogleCredential? cred, BqRedactor r, ILogger logger)
+        : this(http, cfg, r, logger, ct => BqAuth.AccessTokenAsync(cred, ct))
+    {
+    }
+
+    /// <summary>The production path always goes through the public constructor above, bound to a
+    /// <see cref="GoogleCredential"/>. This one exists so a test can supply a token source that
+    /// fails in ways a real <see cref="GoogleCredential"/> is impractical to force (a
+    /// <c>TokenResponseException</c> from a bad refresh, say) -- see the token-acquisition-failure
+    /// case in <c>BqRestClientTests</c>.</summary>
+    internal BqRestClient(
+        HttpClient http, BqConnectionConfig cfg, BqRedactor r, ILogger logger, Func<CancellationToken, Task<string?>> tokenSource)
+    {
+        this.http = http;
+        this.cfg = cfg;
+        this.r = r;
+        this.logger = logger;
+        this.tokenSource = tokenSource;
+    }
 
     /// <summary>Exposed so <see cref="BqJob.SubmitAndWaitAsync"/> can classify a job's
     /// <c>errorResult</c> through the same redactor every REST failure on this client already
@@ -117,7 +143,7 @@ internal sealed partial class BqRestClient(HttpClient http, BqConnectionConfig c
         string context, CancellationToken ct, params HttpStatusCode[] tolerate)
     {
         using var response = await SendRawAsync(method, relativePath, jsonBody, extraHeaders, context, ct).ConfigureAwait(false);
-        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var body = await ReadBodyAsync(response, context, ct).ConfigureAwait(false);
 
         if ((int)response.StatusCode is >= 200 and < 300 || Array.IndexOf(tolerate, response.StatusCode) >= 0)
         {
@@ -155,18 +181,13 @@ internal sealed partial class BqRestClient(HttpClient http, BqConnectionConfig c
         return await SendCoreAsync(request, context, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Attaches the bearer token (if any) and sends. A caller-driven cancellation always
-    /// propagates unwrapped; an HttpClient-internal timeout arrives as a <see cref="TaskCanceledException"/>
-    /// whose <see cref="Exception.InnerException"/> is a <see cref="TimeoutException"/> (the
-    /// documented way .NET distinguishes the two since HttpClient started honoring its own
-    /// <c>Timeout</c> this way) -- that inner exception, never the <see cref="OperationCanceledException"/>
-    /// wrapping it, is what reaches <see cref="BqErrors.Wrap"/>, which refuses any
-    /// <see cref="OperationCanceledException"/> outright.</summary>
-    private async Task<HttpResponseMessage> SendCoreAsync(HttpRequestMessage request, string context, CancellationToken ct)
-    {
-        try
+    /// <summary>Attaches the bearer token (if any) and sends, through the same transport-exception
+    /// classification <see cref="ReadBodyAsync"/> uses -- a dropped connection looks the same
+    /// whether it happens while writing the request or while reading the response.</summary>
+    private Task<HttpResponseMessage> SendCoreAsync(HttpRequestMessage request, string context, CancellationToken ct) =>
+        GuardTransportAsync(async () =>
         {
-            var token = await BqAuth.AccessTokenAsync(cred, ct).ConfigureAwait(false);
+            var token = await AcquireTokenAsync(context, ct).ConfigureAwait(false);
             if (token is not null)
             {
                 r.AddSecret(token);
@@ -175,6 +196,30 @@ internal sealed partial class BqRestClient(HttpClient http, BqConnectionConfig c
 
             logger.LogDebug("bigquery {Method} {Uri}", request.Method, request.RequestUri);
             return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        }, context, ct);
+
+    /// <summary>Reads a response body through the same transport-exception classification
+    /// <see cref="SendCoreAsync"/> uses. <c>HttpCompletionOption.ResponseHeadersRead</c> means the
+    /// body is not actually pulled off the wire until this call, so a connection dropped mid-body
+    /// throws here, not there -- without this, that failure would escape unclassified past every
+    /// caller straight out of <c>ExecuteAsync</c>/the resumable-upload handshake.</summary>
+    private Task<string> ReadBodyAsync(HttpResponseMessage response, string context, CancellationToken ct) =>
+        GuardTransportAsync(() => response.Content.ReadAsStringAsync(ct), context, ct);
+
+    /// <summary>The one place that knows how to turn a transport-level failure into a classified
+    /// <see cref="PzConnectorException"/> (or let it alone). A caller-driven cancellation always
+    /// propagates unwrapped; an HttpClient-internal timeout arrives as a
+    /// <see cref="TaskCanceledException"/> whose <see cref="Exception.InnerException"/> is a
+    /// <see cref="TimeoutException"/> (the documented way .NET distinguishes the two since
+    /// HttpClient started honoring its own <c>Timeout</c> this way) -- that inner exception, never
+    /// the <see cref="OperationCanceledException"/> wrapping it, is what reaches
+    /// <see cref="BqErrors.Wrap"/>, which refuses any <see cref="OperationCanceledException"/>
+    /// outright.</summary>
+    private async Task<T> GuardTransportAsync<T>(Func<Task<T>> action, string context, CancellationToken ct)
+    {
+        try
+        {
+            return await action().ConfigureAwait(false);
         }
         catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException timeout)
         {
@@ -187,6 +232,33 @@ internal sealed partial class BqRestClient(HttpClient http, BqConnectionConfig c
         catch (Exception ex) when (ex is HttpRequestException or IOException or SocketException)
         {
             throw BqErrors.Wrap(ex, r, context);
+        }
+    }
+
+    /// <summary>Acquiring a token is a distinct failure mode from sending the request that carries
+    /// it: a stale/misconfigured credential (an expired refresh token, a revoked service account, a
+    /// broken metadata-server lookup) never reaches the network at all, so it must not fall through
+    /// <see cref="GuardTransportAsync{T}"/>'s HTTP-shaped classification -- it is always an
+    /// authentication problem, never transient, and the underlying exception (a
+    /// <c>TokenResponseException</c>, an <see cref="InvalidOperationException"/> from the credential
+    /// layer, or anything else the credential implementation throws) may echo request context that
+    /// needs the same redaction every other failure message gets.</summary>
+    private async Task<string?> AcquireTokenAsync(string context, CancellationToken ct)
+    {
+        try
+        {
+            return await tokenSource(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new PzConnectorException(
+                BqCodes.Message(BqCodes.Remote_Unauthenticated, r,
+                    $"{context}: could not obtain a bearer token: {ex.Message} -- check the service-account key or Application Default Credentials"),
+                isTransient: false, innerException: ex);
         }
     }
 
