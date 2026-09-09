@@ -7,11 +7,18 @@ namespace Pz.Connector.BigQuery;
 /// <summary>Lands a <c>query:</c> read's SQL into a table under <see cref="BqConnectionConfig.StagingDataset"/>
 /// via a query job, then hands the destination back so the rest of the source treats it like any
 /// other table -- the Storage Read API cannot stream an arbitrary query's results directly. Results
-/// are cached by the trimmed query text: <see cref="ConcurrentDictionary{TKey,TValue}.GetOrAdd"/> of
-/// a lazily started task means two callers materializing the same query in one run (a source's own
-/// <c>GetSchemaAsync</c> then <c>PlanReadAsync</c>) share a single query job rather than each
-/// submitting their own. A faulted materialization is evicted from the cache on its way out so a
-/// later call (a retry, say) resubmits rather than replaying the same failure forever.</summary>
+/// are cached by the trimmed query text in a <c>Lazy&lt;Task&lt;TableRef&gt;&gt;</c> per key: two
+/// callers racing to materialize the same query in one run (a source's own <c>GetSchemaAsync</c> then
+/// <c>PlanReadAsync</c>, called concurrently) must submit exactly one query job between them, never
+/// two -- a plain <c>Task</c> in the dictionary is not enough for that, since
+/// <see cref="ConcurrentDictionary{TKey,TValue}.GetOrAdd"/> may invoke a losing caller's value
+/// factory before discarding its result, and an async method's factory already started the real job
+/// submission by the time it returns a <c>Task</c>. Wrapping the task in
+/// <c>Lazy&lt;T&gt;(LazyThreadSafetyMode.ExecutionAndPublication)</c> defers that submission until
+/// <c>.Value</c> is actually read, and only the one <see cref="Lazy{T}"/> instance <c>GetOrAdd</c>
+/// ends up publishing ever has its value factory run -- so exactly one job is submitted regardless of
+/// how many callers raced to get here. A faulted materialization is evicted from the cache on its way
+/// out so a later call (a retry, say) resubmits rather than replaying the same failure forever.</summary>
 internal sealed class BqQueryMaterializer : IAsyncDisposable
 {
     // Long enough to outlive a run that never gets to call DisposeAsync (a crash, a killed process) --
@@ -23,7 +30,7 @@ internal sealed class BqQueryMaterializer : IAsyncDisposable
     private readonly BqConnectionConfig _cfg;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
-    private readonly ConcurrentDictionary<string, Task<TableRef>> _cache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<Task<TableRef>>> _cache = new(StringComparer.Ordinal);
 
     public BqQueryMaterializer(BqRestClient rest, BqConnectionConfig cfg, TimeProvider time, ILogger logger)
     {
@@ -36,17 +43,18 @@ internal sealed class BqQueryMaterializer : IAsyncDisposable
     public async Task<TableRef> MaterializeAsync(string query, CancellationToken ct)
     {
         var key = query.Trim();
-        var task = _cache.GetOrAdd(key, _ => MaterializeCoreAsync(key, ct));
+        var lazy = _cache.GetOrAdd(key,
+            _ => new Lazy<Task<TableRef>>(() => MaterializeCoreAsync(key, ct), LazyThreadSafetyMode.ExecutionAndPublication));
         try
         {
-            return await task.ConfigureAwait(false);
+            return await lazy.Value.ConfigureAwait(false);
         }
         catch
         {
-            // Only removes the exact faulted task this call observed -- a racing caller that already
+            // Only removes the exact faulted Lazy this call observed -- a racing caller that already
             // replaced it with a fresh attempt (unlikely, but not impossible between the throw above
-            // and this catch) must not have its in-flight task yanked out from under it.
-            _cache.TryRemove(new KeyValuePair<string, Task<TableRef>>(key, task));
+            // and this catch) must not have its in-flight entry yanked out from under it.
+            _cache.TryRemove(new KeyValuePair<string, Lazy<Task<TableRef>>>(key, lazy));
             throw;
         }
     }
@@ -54,17 +62,19 @@ internal sealed class BqQueryMaterializer : IAsyncDisposable
     /// <summary>Drops every table this instance materialized -- a 404 (already gone) is tolerated by
     /// <see cref="BqRestClient.DeleteTableAsync"/> itself; any other failure is logged, never thrown,
     /// so a staging cleanup problem never masks the run's real outcome or blocks the source from
-    /// disposing.</summary>
+    /// disposing. <see cref="Lazy{T}.IsValueCreated"/> guards against ever starting a materialization
+    /// here that no caller actually triggered -- reading <c>.Value</c> unconditionally would do
+    /// exactly that for any cache entry a racing <c>GetOrAdd</c> created but no caller reached yet.</summary>
     public async ValueTask DisposeAsync()
     {
-        foreach (var (_, task) in _cache)
+        foreach (var (_, lazy) in _cache)
         {
-            if (!task.IsCompletedSuccessfully)
+            if (!lazy.IsValueCreated || !lazy.Value.IsCompletedSuccessfully)
             {
                 continue;
             }
 
-            var table = task.Result;
+            var table = lazy.Value.Result;
             try
             {
                 await _rest.DeleteTableAsync(table, CancellationToken.None).ConfigureAwait(false);
