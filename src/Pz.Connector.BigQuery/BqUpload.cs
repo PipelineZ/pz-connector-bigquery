@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 
@@ -9,7 +10,8 @@ namespace Pz.Connector.BigQuery;
 /// <c>POST .../upload/bigquery/v2/.../jobs?uploadType=resumable</c> against <c>RestBase</c> to open a
 /// session, then <c>PUT</c> the bytes to whatever absolute <c>Location</c> that leg answers with.
 /// That <c>Location</c> is a session URI Google mints and owns; it is used exactly as given, never
-/// re-composed against <c>RestBase</c>.</summary>
+/// re-composed against <c>RestBase</c> -- except for the one case no real Google response can ever
+/// produce (<see cref="RewriteUnspecifiedHost"/>).</summary>
 internal sealed partial class BqRestClient
 {
     /// <summary>Uploads <paramref name="content"/> as the load job's data. The caller keeps
@@ -64,10 +66,29 @@ internal sealed partial class BqRestClient
 
         if (response.Headers.Location is { IsAbsoluteUri: true } location)
         {
-            return location;
+            return RewriteUnspecifiedHost(location);
         }
 
         throw BqErrors.FromRest((int)response.StatusCode, "missingUploadLocation",
             "resumable upload initiation returned no Location header to PUT the bytes to", null, r, context);
+    }
+
+    /// <summary>A dockerized emulator binds <c>0.0.0.0</c>/<c>::0</c> and echoes that same
+    /// unspecified address straight back in its own <c>Location</c> header instead of a host this
+    /// process can actually connect to -- confirmed against
+    /// <c>ghcr.io/goccy/bigquery-emulator:0.8.1</c>, whose resumable-upload initiation answers
+    /// <c>Location: http://0.0.0.0:9050/...</c> regardless of what was requested. Real BigQuery's
+    /// <c>Location</c> is always a fully qualified <c>googleapis.com</c> URI, so this only ever
+    /// rewrites against a test double: everything but the host/port is kept exactly as given
+    /// (the emulator's own upload-session query string, most importantly).</summary>
+    private Uri RewriteUnspecifiedHost(Uri location)
+    {
+        if (!IPAddress.TryParse(location.Host, out var host) || !(host.Equals(IPAddress.Any) || host.Equals(IPAddress.IPv6Any)))
+        {
+            return location;
+        }
+
+        var builder = new UriBuilder(location) { Scheme = cfg.RestBase.Scheme, Host = cfg.RestBase.Host, Port = cfg.RestBase.Port };
+        return builder.Uri;
     }
 }

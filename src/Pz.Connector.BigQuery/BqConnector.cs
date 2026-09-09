@@ -11,16 +11,18 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
 {
     private readonly ILoggerFactory _loggerFactory;
     private readonly TimeProvider _time;
+    private readonly long _spoolRollBytes;
 
     public BqConnector(ILoggerFactory? loggerFactory = null)
         : this(loggerFactory, TimeProvider.System)
     {
     }
 
-    internal BqConnector(ILoggerFactory? loggerFactory, TimeProvider time)
+    internal BqConnector(ILoggerFactory? loggerFactory, TimeProvider time, long spoolRollBytes = 64 * 1024 * 1024)
     {
         _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         _time = time;
+        _spoolRollBytes = spoolRollBytes;
     }
 
     public ConnectorInfo Info { get; } = new(
@@ -75,8 +77,15 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
             new BqSource(connection, rest, factory, connection.Redactor, _loggerFactory.CreateLogger<BqSource>(), _time, materializer));
     }
 
-    ValueTask<ISink> ISinkConnector.OpenAsync(ConnectorConfig config, CancellationToken ct) =>
-        throw new NotImplementedException();
+    ValueTask<ISink> ISinkConnector.OpenAsync(ConnectorConfig config, CancellationToken ct)
+    {
+        var connection = ParseOrThrow(config);
+        var credential = BqAuth.Create(connection);
+        var rest = new BqRestClient(new HttpClient(), connection, credential, connection.Redactor,
+            _loggerFactory.CreateLogger<BqRestClient>());
+        return ValueTask.FromResult<ISink>(
+            new BqSink(connection, rest, connection.Redactor, _loggerFactory.CreateLogger<BqSink>(), _time, _spoolRollBytes));
+    }
 
     public ValueTask<ConnectionCheck> CheckConnectionAsync(ConnectorConfig config, CancellationToken ct) =>
         throw new NotImplementedException();

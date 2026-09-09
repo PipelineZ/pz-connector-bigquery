@@ -31,14 +31,29 @@ internal sealed partial record BqJob
         BqRestClient rest, string project, BqJob job, string purpose, TimeProvider time, ILogger logger, CancellationToken ct)
     {
         var inserted = await rest.InsertJobAsync(project, job, ct).ConfigureAwait(false);
-        var jobId = inserted.JobReference?.JobId
-            ?? throw new InvalidOperationException("the inserted job carries no jobReference.jobId to poll");
-        // The insert response usually echoes jobReference.location back, but is not guaranteed to
-        // -- falling back to the location the caller submitted keeps every jobs.get call addressed
-        // to the same region the job actually runs in.
-        var location = inserted.JobReference?.Location ?? job.JobReference?.Location;
+        return await WaitAsync(rest, project, inserted, job.JobReference?.Location, purpose, time, logger, ct).ConfigureAwait(false);
+    }
 
-        var current = inserted;
+    /// <summary>Polls an already-submitted job to <c>DONE</c>, applying the same backoff schedule as
+    /// <see cref="SubmitAndWaitAsync"/> -- used by the load path, whose job is submitted through the
+    /// resumable-upload handshake (<see cref="BqRestClient.UploadLoadJobAsync"/>) rather than
+    /// <c>jobs.insert</c>, so there is no separate insert call here to make. <paramref name="submitted"/>
+    /// is whatever that submission call already returned (a <c>jobs.insert</c> or upload-PUT
+    /// response), which may itself already report <c>DONE</c> -- exactly the case
+    /// <see cref="SubmitAndWaitAsync"/>'s own doc describes, classified here with no extra
+    /// <c>jobs.get</c> call either.</summary>
+    public static async Task<BqJob> WaitAsync(
+        BqRestClient rest, string project, BqJob submitted, string? fallbackLocation, string purpose,
+        TimeProvider time, ILogger logger, CancellationToken ct)
+    {
+        var jobId = submitted.JobReference?.JobId
+            ?? throw new InvalidOperationException("the submitted job carries no jobReference.jobId to poll");
+        // The submission response usually echoes jobReference.location back, but is not guaranteed
+        // to -- falling back to the caller-supplied location keeps every jobs.get call addressed to
+        // the same region the job actually runs in.
+        var location = submitted.JobReference?.Location ?? fallbackLocation;
+
+        var current = submitted;
         if (!string.Equals(current.Status?.State, "DONE", StringComparison.Ordinal))
         {
             current = await rest.GetJobAsync(project, jobId, location, ct).ConfigureAwait(false);

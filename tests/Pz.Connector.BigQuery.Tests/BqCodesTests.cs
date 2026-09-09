@@ -4,9 +4,9 @@ namespace Pz.Connector.BigQuery.Tests;
 
 public sealed partial class BqCodesTests
 {
-    // 9 (01xx) + 7 (02xx) + 6 (03xx) + 9 (04xx) consts declared in BqCodes -- counted by hand and
+    // 9 (01xx) + 7 (02xx) + 7 (03xx) + 9 (04xx) consts declared in BqCodes -- counted by hand and
     // kept in sync with BqCodes.All whenever a code is added or removed.
-    private const int ExpectedCodeCount = 31;
+    private const int ExpectedCodeCount = 32;
 
     [Fact]
     public void All_codes_are_unique_and_match_the_PZBQ_shape()

@@ -241,6 +241,48 @@ public sealed class BqRestClientTests
         Assert.Equal("row1\nrow2\n", await reader.ReadToEndAsync());
     }
 
+    // Confirmed against the live emulator (ghcr.io/goccy/bigquery-emulator:0.8.1): its resumable-
+    // upload initiation answers "Location: http://0.0.0.0:9050/..." regardless of what host was
+    // actually requested -- it binds 0.0.0.0 and echoes that same unspecified address back, which is
+    // not a host this process can connect to. Real BigQuery's Location is always a fully qualified
+    // googleapis.com URI, so BqRestClient rewrites only this one unusable shape, keeping the rest of
+    // the URI (the emulator's own upload-session query string) untouched.
+    [Theory]
+    [InlineData("http://0.0.0.0:9050/upload/session/abc?upload_id=x")]
+    [InlineData("http://[::0]:9050/upload/session/abc?upload_id=x")]
+    public async Task UploadLoadJobAsync_rewrites_an_unspecified_host_in_Location_to_the_endpoint_actually_used(string location)
+    {
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Post, "/upload/bigquery/v2/projects/p/jobs?uploadType=resumable", 200, "ignored",
+            new Dictionary<string, string> { ["Location"] = location });
+        handler.Add(HttpMethod.Put, "/upload/session/abc?upload_id=x", 200, JobJson("job1", "DONE"));
+        var client = Client(handler, "http://fake:1234/");
+        var job = new BqJob(new BqJobReference("p", "job1", null), null, null);
+        using var content = new MemoryStream(Encoding.UTF8.GetBytes("row1\n"));
+
+        var result = await client.UploadLoadJobAsync("p", job, content, 5, CancellationToken.None);
+
+        Assert.Equal("DONE", result.Status?.State);
+        var put = handler.Requests[1];
+        Assert.Equal("http://fake:1234/upload/session/abc?upload_id=x", put.Url.ToString());
+    }
+
+    [Fact]
+    public async Task UploadLoadJobAsync_leaves_a_real_upload_hosts_Location_untouched()
+    {
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Post, "/upload/bigquery/v2/projects/p/jobs?uploadType=resumable", 200, "ignored",
+            new Dictionary<string, string> { ["Location"] = "http://fake-upload/session/abc" });
+        handler.Add(HttpMethod.Put, "/session/abc", 200, JobJson("job1", "DONE"));
+        var client = Client(handler);
+        var job = new BqJob(new BqJobReference("p", "job1", null), null, null);
+        using var content = new MemoryStream(Encoding.UTF8.GetBytes("row1\n"));
+
+        await client.UploadLoadJobAsync("p", job, content, 5, CancellationToken.None);
+
+        Assert.Equal("http://fake-upload/session/abc", handler.Requests[1].Url.ToString());
+    }
+
     [Fact]
     public async Task UploadLoadJobAsync_missing_Location_header_is_PZBQ0409_non_transient()
     {

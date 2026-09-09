@@ -123,8 +123,18 @@ public sealed class BqFixture : IAsyncLifetime
         return JsonDocument.Parse(text).RootElement.Clone();
     }
 
-    public Task DeleteTableAsync(string table) =>
-        SendAsync(HttpMethod.Delete, $"/bigquery/v2/projects/{Project}/datasets/{Dataset}/tables/{table}", null);
+    /// <summary>Idempotent: a 404 (the table was never created) is not an error here -- callers use
+    /// this to reset a target to "known absent" before a fact runs, and a fact whose target this
+    /// particular instance never wrote to yet must reset just as cleanly as one that did.</summary>
+    public async Task DeleteTableAsync(string table)
+    {
+        using var response = await Http.DeleteAsync($"/bigquery/v2/projects/{Project}/datasets/{Dataset}/tables/{table}").ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode && response.StatusCode != System.Net.HttpStatusCode.NotFound)
+        {
+            var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            throw new InvalidOperationException($"DELETE tables/{table} -> {(int)response.StatusCode}: {text}");
+        }
+    }
 
     /// <summary>Every table id currently in <paramref name="dataset"/>, via <c>tables.list</c> --
     /// used to count/observe tables a query-mode read materializes and drops rather than asserting

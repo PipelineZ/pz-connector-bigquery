@@ -19,6 +19,26 @@ internal static class BqSql
     public static string Select(TableRef staging, IReadOnlyList<string> cols) =>
         $"select {ColumnList(cols)} from {staging.Quoted}";
 
+    /// <summary>The deduplicated final state a merge would insert against an empty target: last
+    /// <c>_pz_seq</c> within the session wins per key, exactly like <see cref="Merge"/>'s own
+    /// <c>using (...)</c> subquery. Run as a query-destination job's SQL to create a merge target
+    /// that does not exist yet -- <c>merge</c>'s own DML syntax requires an existing target, so
+    /// creating one from nothing is a plain select into a new destination, never a MERGE
+    /// statement.</summary>
+    public static string DedupedSelect(TableRef staging, IReadOnlyList<string> cols, IReadOnlyList<string> keys)
+    {
+        var colList = ColumnList(cols);
+        var keyList = ColumnList(keys);
+
+        var sql = new StringBuilder();
+        sql.Append("select ").Append(colList).Append(" from (\n");
+        sql.Append("  select ").Append(colList)
+            .Append(", row_number() over (partition by ").Append(keyList).Append(" order by `_pz_seq` desc) as `_pz_rn`\n");
+        sql.Append("  from ").Append(staging.Quoted).Append('\n');
+        sql.Append(") where `_pz_rn` = 1");
+        return sql.ToString();
+    }
+
     /// <summary>Deduplicates staged rows on the merge keys (last <c>_pz_seq</c> within the session
     /// wins), then upserts against the target. The <c>on</c> clause treats null keys as matching
     /// null keys, since GoogleSQL's own <c>=</c> would otherwise never match two nulls. <c>when

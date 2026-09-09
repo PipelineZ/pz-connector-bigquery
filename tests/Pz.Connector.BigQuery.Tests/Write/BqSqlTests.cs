@@ -76,6 +76,28 @@ public sealed class BqSqlTests
     }
 
     [Fact]
+    public void DedupedSelect_matches_Merges_own_using_subquery_unwrapped()
+    {
+        var sql = BqSql.DedupedSelect(Staging, ["id", "name", "amount"], ["id"]);
+
+        var expected =
+            "select `id`, `name`, `amount` from (\n"
+            + "  select `id`, `name`, `amount`, row_number() over (partition by `id` order by `_pz_seq` desc) as `_pz_rn`\n"
+            + "  from `p`.`d`.`staging`\n"
+            + ") where `_pz_rn` = 1";
+
+        Assert.Equal(expected, sql);
+    }
+
+    [Fact]
+    public void DedupedSelect_with_two_keys_partitions_by_both()
+    {
+        var sql = BqSql.DedupedSelect(Staging, ["k1", "k2", "v"], ["k1", "k2"]);
+
+        Assert.Contains("partition by `k1`, `k2`", sql);
+    }
+
+    [Fact]
     public void Identifiers_with_special_characters_are_backtick_escaped()
     {
         var target = new TableRef("p", "d", "ta`ble");
