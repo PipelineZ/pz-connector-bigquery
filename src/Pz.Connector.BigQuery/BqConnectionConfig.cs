@@ -187,7 +187,10 @@ internal sealed partial record BqConnectionConfig(
 
         if (!Uri.TryCreate(endpointText, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
         {
-            errors.Add($"'endpoint' must be an absolute http or https URL; got '{endpointText}'");
+            // Never echoes the value itself: unlike every other rejected config value here, this one
+            // can carry a credential (a userinfo-bearing URL), so the message names only the key and
+            // the rule it failed.
+            errors.Add("'endpoint' must be an absolute http or https URL");
             return null;
         }
 
