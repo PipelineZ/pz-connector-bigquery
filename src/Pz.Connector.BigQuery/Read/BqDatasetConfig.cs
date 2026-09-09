@@ -82,6 +82,13 @@ internal sealed record BqDatasetConfig(TableRef? Table, string? Query, int Strea
             case int i:
                 value = i;
                 break;
+            // Every external connector is process-hosted only (PZ0360), so this option normally
+            // crosses PCP inside a protobuf Struct, whose only numeric kind is `double`
+            // (google.protobuf.Value.NumberValue) -- a real run never hands this a long/int at
+            // all. Accepted only when it is a whole number; a fraction is not a stream count.
+            case double d when !double.IsNaN(d) && !double.IsInfinity(d) && d == Math.Floor(d):
+                value = (long)d;
+                break;
             default:
                 errors.Add($"'streams' must be an integer between {MinStreams} and {MaxStreams} (got '{raw}')");
                 return DefaultStreams;

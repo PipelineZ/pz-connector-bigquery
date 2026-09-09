@@ -8,6 +8,8 @@ connection:
   staging_dataset: e2e
 read:
   dataset: e2e.orders_in
+  # The emulator's Storage Read API grants exactly one stream regardless of what is asked for.
+  streams: 1
 write:
   output: e2e.e2e_probe
   mode: append

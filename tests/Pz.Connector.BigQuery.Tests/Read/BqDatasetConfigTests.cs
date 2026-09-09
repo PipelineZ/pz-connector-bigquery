@@ -82,7 +82,13 @@ public sealed class BqDatasetConfigTests
     [InlineData(8L)]
     [InlineData(1)]
     [InlineData(64)]
-    public void Streams_accepts_long_or_int_in_range(object streams)
+    // A whole-number double is the only numeric shape an out-of-process caller can send: PCP
+    // carries dataset options through a protobuf Struct, whose one numeric kind is `double`
+    // (google.protobuf.Value.NumberValue) -- every real run hits this branch, not long/int.
+    [InlineData(1.0)]
+    [InlineData(64.0)]
+    [InlineData(8.0)]
+    public void Streams_accepts_long_int_or_whole_double_in_range(object streams)
     {
         var errors = new List<string>();
         var config = BqDatasetConfig.Parse(Spec("sales.orders", new() { ["streams"] = streams }), Connection(), errors);
@@ -96,6 +102,8 @@ public sealed class BqDatasetConfigTests
     [InlineData(65L)]
     [InlineData(0)]
     [InlineData(65)]
+    [InlineData(0.0)]
+    [InlineData(65.0)]
     public void Streams_out_of_range_is_refused(object streams)
     {
         var errors = new List<string>();
@@ -105,11 +113,14 @@ public sealed class BqDatasetConfigTests
         Assert.Contains(errors, e => e.Contains("'streams'"));
     }
 
-    [Fact]
-    public void Streams_of_the_wrong_type_is_refused()
+    [Theory]
+    [InlineData("4")]
+    // A fractional double is not a whole stream count even though it is the wire's numeric kind.
+    [InlineData(1.5)]
+    public void Streams_of_the_wrong_type_is_refused(object streams)
     {
         var errors = new List<string>();
-        var config = BqDatasetConfig.Parse(Spec("sales.orders", new() { ["streams"] = "4" }), Connection(), errors);
+        var config = BqDatasetConfig.Parse(Spec("sales.orders", new() { ["streams"] = streams }), Connection(), errors);
 
         Assert.Null(config);
         Assert.Contains(errors, e => e.Contains("'streams'"));

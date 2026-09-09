@@ -11,6 +11,9 @@ bq:
     orders_in:
       read:
         entity: e2e.orders_in
+        # The emulator's Storage Read API grants exactly one stream regardless of what is asked
+        # for ("currently supported only one stream"); real BigQuery grants as many as it likes.
+        streams: 1
     orders_out:
       write:
         entity: e2e.orders_out
