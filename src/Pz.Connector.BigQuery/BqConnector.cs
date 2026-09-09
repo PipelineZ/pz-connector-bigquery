@@ -56,8 +56,12 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
           "additionalProperties": false }
         """;
 
-    public ValueTask<ValidationResult> ValidateAsync(ConnectorConfig config, CancellationToken ct) =>
-        ValueTask.FromResult(ValidationResult.Success);
+    public ValueTask<ValidationResult> ValidateAsync(ConnectorConfig config, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        BqConnectionConfig.Parse(config, errors);
+        return ValueTask.FromResult(errors.Count == 0 ? ValidationResult.Success : ValidationResult.Failed([.. errors]));
+    }
 
     ValueTask<ISource> ISourceConnector.OpenAsync(ConnectorConfig config, CancellationToken ct) =>
         throw new NotImplementedException();
