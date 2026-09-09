@@ -60,6 +60,20 @@ public sealed class BqRestClientTests
     }
 
     [Fact]
+    public async Task GetTableAsync_malformed_2xx_body_classifies_as_PZBQ0409_not_a_raw_JsonException()
+    {
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Get, "/bigquery/v2/projects/p/datasets/d/tables/t", 200, "not json at all {{{");
+        var client = Client(handler);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            () => client.GetTableAsync(new TableRef("p", "d", "t"), CancellationToken.None));
+
+        Assert.False(ex.IsTransient);
+        Assert.Contains("PZBQ0409", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GetTableAsync_403_access_denied_classifies_as_PZBQ0405()
     {
         var handler = new FakeHandler();

@@ -194,7 +194,11 @@ internal sealed partial class BqRestClient
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             }
 
-            logger.LogDebug("bigquery {Method} {Uri}", request.Method, request.RequestUri);
+            // GetLeftPart(UriPartial.Path) drops the query string -- this path is shared by the
+            // resumable-upload PUT (BqUpload.cs), whose RequestUri is a session URI Google mints
+            // carrying the upload id as a query parameter, a bearer-equivalent capability for that
+            // upload that must never reach a log line.
+            logger.LogDebug("bigquery {Method} {Uri}", request.Method, request.RequestUri?.GetLeftPart(UriPartial.Path));
             return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         }, context, ct);
 
@@ -310,7 +314,22 @@ internal sealed partial class BqRestClient
     }
 
     private T DeserializeOrThrow<T>(string body, JsonTypeInfo<T> typeInfo, string context)
-        where T : class =>
-        JsonSerializer.Deserialize(body, typeInfo)
-        ?? throw new PzConnectorException(BqCodes.Message(BqCodes.Remote_Other, r, $"{context}: response body did not parse"), isTransient: false);
+        where T : class
+    {
+        T? result;
+        try
+        {
+            result = JsonSerializer.Deserialize(body, typeInfo);
+        }
+        catch (JsonException)
+        {
+            // A 2xx status only means the transport succeeded -- a rewriting proxy or a
+            // misbehaving emulator can still answer with a body that is not the JSON this call
+            // expects (or not JSON at all). That must surface as a classified PZBQ#### error like
+            // every other failure on this client, never a raw JsonException.
+            throw new PzConnectorException(BqCodes.Message(BqCodes.Remote_Other, r, $"{context}: response body did not parse"), isTransient: false);
+        }
+
+        return result ?? throw new PzConnectorException(BqCodes.Message(BqCodes.Remote_Other, r, $"{context}: response body did not parse"), isTransient: false);
+    }
 }
