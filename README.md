@@ -102,7 +102,9 @@ predicate pushdown and the incremental watermark become an AND of parenthesized
 `row_restriction` terms, e.g. `(region = 'EU') AND (updated_at > TIMESTAMP '...')`. The cursor
 literal is typed from the table's own schema (a numeric column becomes a bare number, a date
 becomes `DATE '...'`, a string is quoted and escaped, and so on) -- an unsupported cursor type or a
-cursor column absent from the schema is refused before any request is sent.
+cursor column absent from the schema is refused before any request is sent. A predicate containing
+a double quote is never pushed down (GoogleSQL reads `"..."` as a string literal, not the quoted
+identifier DuckDB means it as) and is instead left for the engine to filter locally.
 
 `streams:` (1-64, default 4) is the `max_stream_count` asked of the Storage Read API session; the
 service may grant fewer, and an empty table grants zero, which reads as zero rows.
@@ -193,10 +195,11 @@ truncates the target, an empty merge is a no-op, and a missing target is still c
 | list/struct/map/union/dictionary/interval/duration/null | refused (`PZBQ0303`) | -- |
 
 On the wire, the connector emits BigQuery's legacy type aliases (`INTEGER`, `FLOAT`, `BOOLEAN`)
-rather than the GoogleSQL names in the table above -- the Storage Read API surface this connector
-also uses accepts only the legacy spellings, and BigQuery treats both as the same type. Schema
-comparison against an existing target (`fail_on_change`, below) normalizes both spellings, so a
-target created through the console with `INT64`/`FLOAT64`/`BOOL` columns is not a mismatch.
+rather than the GoogleSQL names in the table above -- the emulator used in this connector's own
+tests accepts only the legacy spellings, while real BigQuery accepts both spellings everywhere and
+treats them as the same type. Schema comparison against an existing target (`fail_on_change`,
+below) normalizes both spellings, so a target created through the console with
+`INT64`/`FLOAT64`/`BOOL` columns is not a mismatch.
 
 Every mapped column is `NULLABLE`; `MaxTextLengths` is ignored (`STRING` is unbounded).
 
