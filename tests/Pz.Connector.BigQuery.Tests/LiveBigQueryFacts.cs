@@ -199,8 +199,11 @@ public sealed class LiveBigQueryFacts
 
     /// <summary>Runs <paramref name="sql"/> via <c>jobs.query</c>, polling <c>jobs.getQueryResults</c>
     /// (and following every <c>pageToken</c>) until the result is complete and fully paged in --
-    /// mirrors <c>BqFixture.QueryAsync</c>'s shape against the admin REST path instead of the
-    /// emulator, reusing <see cref="BqFixture.AssembleRows"/> for the row assembly itself.</summary>
+    /// mirrors <c>BqFixture.QueryAsync</c>'s shape (bounded at 100 attempts, 100 ms apart) against the
+    /// admin REST path instead of the emulator, reusing <see cref="BqFixture.AssembleRows"/> for the
+    /// row assembly itself. Polling real elapsed time against a live remote job is the one place a
+    /// gate can't stand in for a clock -- there is no in-process signal to wait on instead -- so this
+    /// matches the fixture's own bounded shape rather than inventing a different one.</summary>
     private static async Task<List<JsonElement>> QueryLiveAsync(LiveContext ctx, string sql)
     {
         var body = JsonSerializer.Serialize(new { query = sql, useLegacySql = false });
@@ -217,7 +220,7 @@ public sealed class LiveBigQueryFacts
                 throw new TimeoutException($"live query job {jobId} did not complete in time");
             }
 
-            await Task.Delay(TimeSpan.FromMilliseconds(200)).ConfigureAwait(false);
+            await Task.Delay(100).ConfigureAwait(false);
             var pollText = await SendAsync(ctx, HttpMethod.Get, QueryResultsPath(ctx.Project, jobId, location, null), null).ConfigureAwait(false);
             page = ParseQueryPage(pollText);
         }
