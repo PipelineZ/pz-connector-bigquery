@@ -34,6 +34,27 @@ public sealed class BqRowRestrictionTests
     }
 
     [Fact]
+    public void Predicate_without_a_double_quote_is_pushed_unchanged()
+    {
+        var hints = new ReadHints(PredicateSql: "x > 1");
+        var spec = Spec(cursor: "c", value: "3");
+        var result = BqRowRestriction.Build(hints, spec, SchemaOf("c", Int64Type.Default), BqRedactor.None);
+        Assert.Equal("(x > 1) and (`c` > 3)", result);
+    }
+
+    [Fact]
+    public void Predicate_containing_a_double_quote_is_omitted_but_watermark_terms_still_push()
+    {
+        // DuckDB's own parser emits "Ident" (double quotes) for a case-sensitive/reserved-word
+        // identifier; GoogleSQL reads that as a string literal, not a column reference, so this
+        // predicate must never reach BigQuery -- the engine still filters it locally.
+        var hints = new ReadHints(PredicateSql: "\"Weird Col\" > 1");
+        var spec = Spec(cursor: "c", value: "3");
+        var result = BqRowRestriction.Build(hints, spec, SchemaOf("c", Int64Type.Default), BqRedactor.None);
+        Assert.Equal("(`c` > 3)", result);
+    }
+
+    [Fact]
     public void Lower_bound_is_strict_by_default()
     {
         var spec = Spec(cursor: "c", value: "3");

@@ -23,7 +23,13 @@ internal static partial class BqRowRestriction
     {
         var terms = new List<string>();
 
-        if (!string.IsNullOrEmpty(hints.PredicateSql))
+        // DuckDB's own SQL parser -- the source of PredicateSql -- emits "ident" (double quotes) for
+        // any identifier that needs quoting, but GoogleSQL reads a double-quoted token as a STRING
+        // LITERAL, not an identifier. Pushing such a predicate verbatim does not fail loudly: it
+        // silently compares the wrong thing (or a typed column against a string) and can return wrong
+        // rows. Omitting the term here is always safe -- the engine still filters the same predicate
+        // locally against the unfiltered read -- so a predicate containing '"' is simply not pushed.
+        if (!string.IsNullOrEmpty(hints.PredicateSql) && !hints.PredicateSql.Contains('"'))
         {
             terms.Add($"({hints.PredicateSql})");
         }
