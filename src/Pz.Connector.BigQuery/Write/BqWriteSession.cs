@@ -10,7 +10,13 @@ namespace Pz.Connector.BigQuery;
 /// <see cref="CommitAsync"/>. <see cref="AbortAsync"/> only ever needs to drop the spool in practice
 /// (staging is created nowhere but inside <see cref="CommitAsync"/>, and the engine never calls Abort
 /// once Commit has been attempted), but still checks <see cref="_stagingCreated"/> for the same
-/// defensive symmetry <see cref="CommitAsync"/>'s own <c>finally</c> block already applies.</summary>
+/// defensive symmetry <see cref="CommitAsync"/>'s own <c>finally</c> block already applies.
+///
+/// <para>CLEANUP NEVER THROWS: every cleanup step (spool delete, staging drop) is individually
+/// guarded and logged at Warning rather than allowed to propagate -- a temp-directory deletion
+/// failure or a stray staging-drop error must never turn an already-committed write into a reported
+/// failure (the engine would retry it, and in <c>append</c> mode a retry re-loads rows the target
+/// already has), and must never mask whatever exception the commit itself actually raised.</para></summary>
 internal sealed class BqWriteSession : ISinkWriteSession
 {
     // Long enough to outlive a run that never gets to run this session's own cleanup (a crash, a
@@ -75,17 +81,6 @@ internal sealed class BqWriteSession : ISinkWriteSession
         EnsureNotFinished();
         _state = State.Committed;
 
-        // Checked before any network call at all -- an unsupported policy is a config mistake, not
-        // something a wasted staging table or load job should precede.
-        if (string.Equals(_spec.SchemaPolicy, "evolve", StringComparison.Ordinal))
-        {
-            throw new PzConnectorException(
-                BqCodes.Message(BqCodes.Write_SchemaEvolveUnsupported, _redactor,
-                    $"output '{_spec.Output}': schema evolution is not supported; use 'fail_on_change' and "
-                    + "align the target table by hand, or drop it and let the sink recreate it"),
-                isTransient: false);
-        }
-
         var start = _time.GetTimestamp();
         var stagingDataset = _cfg.StagingDataset ?? new TableRef(_target.Project, _target.Dataset, "");
         var staging = new TableRef(stagingDataset.Project, stagingDataset.Dataset, $"pz_load_{Guid.NewGuid():N}");
@@ -95,8 +90,12 @@ internal sealed class BqWriteSession : ISinkWriteSession
         {
             var files = await _spool.CloseAsync().ConfigureAwait(false);
 
-            await CreateStagingTableAsync(staging, ct).ConfigureAwait(false);
+            // Set before the call, not after it returns: a create that succeeded server-side but
+            // whose response never arrived (a dropped connection) must still be dropped by the
+            // finally below -- DeleteTableAsync already tolerates a staging table that, for
+            // whatever reason, never actually got created.
             _stagingCreated = true;
+            await CreateStagingTableAsync(staging, ct).ConfigureAwait(false);
 
             foreach (var file in files)
             {
@@ -112,20 +111,15 @@ internal sealed class BqWriteSession : ISinkWriteSession
         }
         finally
         {
+            // Order does not matter here (unlike AbortAsync below): the spool file is already
+            // closed by CloseAsync above by the time either cleanup step runs, so there is no open
+            // handle for the directory delete to race against.
             if (_stagingCreated)
             {
-                try
-                {
-                    await _rest.DeleteTableAsync(staging, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "bigquery: output {Output}: failed to drop staging table {Staging}",
-                        _spec.Output, staging.Quoted);
-                }
+                await TryDeleteStagingAsync(staging).ConfigureAwait(false);
             }
 
-            _spool.Delete();
+            TryDeleteSpool();
         }
     }
 
@@ -142,20 +136,19 @@ internal sealed class BqWriteSession : ISinkWriteSession
         }
 
         _state = State.Aborted;
-        _spool.Delete();
+
+        // Order matters: the spool's current file may still be open (WriteBatchAsync never closes
+        // it), and BqSpool.Delete() does not know to close it first -- deleting the directory out
+        // from under an open handle leaks it everywhere and hard-fails on Windows. Closing it here
+        // is itself guarded: a flush/close failure must not skip the staging drop that follows.
+        await TryCloseSpoolAsync().ConfigureAwait(false);
 
         if (_stagingCreated && _stagingTable is { } staging)
         {
-            try
-            {
-                await _rest.DeleteTableAsync(staging, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "bigquery: output {Output}: failed to drop staging table {Staging} after abort",
-                    _spec.Output, staging.Quoted);
-            }
+            await TryDeleteStagingAsync(staging).ConfigureAwait(false);
         }
+
+        TryDeleteSpool();
     }
 
     public async ValueTask DisposeAsync()
@@ -186,6 +179,46 @@ internal sealed class BqWriteSession : ISinkWriteSession
         if (_state == State.Aborted)
         {
             throw new InvalidOperationException("the session is aborted");
+        }
+    }
+
+    // Best effort by construction, like BqSpool.Delete's own doc: a cleanup failure here must
+    // never propagate out of Commit/AbortAsync (see the class doc) -- logged and swallowed, never
+    // thrown. The spool's own directory path is not user data (a temp guid, not a config value or
+    // row content), so it is safe to log.
+    private async Task TryDeleteStagingAsync(TableRef staging)
+    {
+        try
+        {
+            await _rest.DeleteTableAsync(staging, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "bigquery: output {Output}: failed to drop staging table {Staging}", _spec.Output, staging.Quoted);
+        }
+    }
+
+    private void TryDeleteSpool()
+    {
+        try
+        {
+            _spool.Delete();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "bigquery: output {Output}: failed to delete the spool directory {Dir}", _spec.Output, _spool.Dir);
+        }
+    }
+
+    private async Task TryCloseSpoolAsync()
+    {
+        try
+        {
+            await _spool.CloseAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "bigquery: output {Output}: failed to close the spool file", _spec.Output);
         }
     }
 
@@ -240,9 +273,18 @@ internal sealed class BqWriteSession : ISinkWriteSession
                     .ConfigureAwait(false);
                 break;
 
-            default: // merge, target exists
+            case "merge": // target exists
                 await RunDmlAsync(BqSql.Merge(_target, staging, _columns, _spec.Keys), ct).ConfigureAwait(false);
                 break;
+
+            default:
+                // BeginWriteAsync already refused any mode outside append/replace/merge (PZBQ0306)
+                // -- reaching here would mean this switch fell behind that check, not that the
+                // engine sent something unexpected. An explicit throw, rather than a `default:`
+                // arm that silently ran the merge DML, keeps a future fourth mode from landing here
+                // unnoticed.
+                throw new InvalidOperationException(
+                    $"unexpected write mode '{_spec.Mode}' reached RunTargetJobAsync -- BeginWriteAsync should have refused it");
         }
     }
 
@@ -250,7 +292,8 @@ internal sealed class BqWriteSession : ISinkWriteSession
     /// caller's query-destination job; present checks the write schema against it
     /// (<see cref="BqTargetSchema.Diff"/>), refusing any mismatch with every offending column named
     /// (<c>PZBQ0304</c>) -- the evolve policy never reaches this method, since
-    /// <see cref="CommitAsync"/> already refused it before any network call.</summary>
+    /// <c>BqSink.BeginWriteAsync</c> already refused it before any network call, before the spool
+    /// even exists.</summary>
     private async Task<bool> EnsureTargetAsync(CancellationToken ct)
     {
         var existing = await _rest.GetTableAsync(_target, ct).ConfigureAwait(false);

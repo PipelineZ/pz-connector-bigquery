@@ -79,8 +79,10 @@ internal sealed partial class BqRestClient
     /// <c>ghcr.io/goccy/bigquery-emulator:0.8.1</c>, whose resumable-upload initiation answers
     /// <c>Location: http://0.0.0.0:9050/...</c> regardless of what was requested. Real BigQuery's
     /// <c>Location</c> is always a fully qualified <c>googleapis.com</c> URI, so this only ever
-    /// rewrites against a test double: everything but the host/port is kept exactly as given
-    /// (the emulator's own upload-session query string, most importantly).</summary>
+    /// rewrites against a test double: everything but scheme/host/port is kept exactly as given
+    /// (the emulator's own upload-session query string, most importantly) -- the scheme is also
+    /// replaced only because the endpoint actually used may not share the unusable URI's own
+    /// (this emulator is always plain <c>http</c> either way).</summary>
     private Uri RewriteUnspecifiedHost(Uri location)
     {
         if (!IPAddress.TryParse(location.Host, out var host) || !(host.Equals(IPAddress.Any) || host.Equals(IPAddress.IPv6Any)))

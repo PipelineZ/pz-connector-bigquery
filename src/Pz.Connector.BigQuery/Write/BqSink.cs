@@ -5,12 +5,13 @@ using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.BigQuery;
 
-/// <summary>Opens one write session per output. Every check here is offline (no network): mode
+/// <summary>Opens one write session per output. Every check here is offline (no network, no
+/// filesystem -- the spool directory is not even computed until every check below has passed): mode
 /// validity (ABI defense in depth -- the engine never sends anything else, but a directly-constructed
-/// spec could), merge keys against the write schema, the reserved <c>_pz_seq</c> column name, the
-/// Arrow-to-BigQuery schema map, and the output's entity name. Everything that touches the network --
-/// staging, loading, and the one job that touches the target -- happens inside
-/// <see cref="BqWriteSession.CommitAsync"/>.</summary>
+/// spec could), the unsupported <c>evolve</c> schema policy, merge keys against the write schema, the
+/// reserved <c>_pz_seq</c> column name, the Arrow-to-BigQuery schema map, and the output's entity
+/// name. Everything that touches the network -- staging, loading, and the one job that touches the
+/// target -- happens inside <see cref="BqWriteSession.CommitAsync"/>.</summary>
 internal sealed class BqSink(
     BqConnectionConfig cfg, BqRestClient rest, BqRedactor redactor, ILogger logger, TimeProvider time,
     long spoolRollBytes = 64 * 1024 * 1024) : ISink
@@ -31,8 +32,28 @@ internal sealed class BqSink(
                 isTransient: false);
         }
 
+        // Checked before any network call at all (and before the spool is even computed) -- an
+        // unsupported policy is a config mistake, not something a wasted spool or staging table
+        // should precede.
+        if (string.Equals(spec.SchemaPolicy, "evolve", StringComparison.Ordinal))
+        {
+            throw new PzConnectorException(
+                BqCodes.Message(BqCodes.Write_SchemaEvolveUnsupported, redactor,
+                    $"output '{spec.Output}': schema evolution is not supported; use 'fail_on_change' and "
+                    + "align the target table by hand, or drop it and let the sink recreate it"),
+                isTransient: false);
+        }
+
         if (string.Equals(spec.Mode, "merge", StringComparison.Ordinal))
         {
+            if (spec.Keys.Count == 0)
+            {
+                throw new PzConnectorException(
+                    BqCodes.Message(BqCodes.Write_MergeKeyMissing, redactor,
+                        $"output '{spec.Output}': merge mode requires at least one merge key (write.keys)"),
+                    isTransient: false);
+            }
+
             var fieldNames = new HashSet<string>(schema.FieldsList.Select(f => f.Name), StringComparer.Ordinal);
             var missing = spec.Keys.Where(k => !fieldNames.Contains(k)).ToList();
             if (missing.Count > 0)
