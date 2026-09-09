@@ -104,6 +104,29 @@ public sealed class BqSchemaMapTests
         Assert.Contains("PZBQ0303", ex.Message, StringComparison.Ordinal);
     }
 
+    // Decimal32Type/Decimal64Type derive from the same FixedSizeBinaryType ancestor as
+    // Decimal128Type/Decimal256Type; the engine only ever hands this connector Decimal128 for a
+    // decimal column, so these narrower decimals are refused rather than mapped to BYTES.
+    [Fact]
+    public void Decimal32_is_PZBQ0303()
+    {
+        var ex = Assert.Throws<PzConnectorException>(() => BqSchemaMap.MapField(F("amount", new Decimal32Type(5, 2)), "target"));
+
+        Assert.Contains("PZBQ0303", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("amount", ex.Message, StringComparison.Ordinal);
+        Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
+    public void Decimal64_is_PZBQ0303()
+    {
+        var ex = Assert.Throws<PzConnectorException>(() => BqSchemaMap.MapField(F("amount", new Decimal64Type(10, 2)), "target"));
+
+        Assert.Contains("PZBQ0303", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("amount", ex.Message, StringComparison.Ordinal);
+        Assert.False(ex.IsTransient);
+    }
+
     [Fact]
     public void Timestamp_with_timezone_maps_to_timestamp()
     {

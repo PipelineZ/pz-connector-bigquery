@@ -81,6 +81,14 @@ internal static class BqSchemaMap
             case Decimal256Type:
                 throw Unsupported(column, type, output);
 
+            // Decimal32Type/Decimal64Type share the same FixedSizeBinaryType ancestry as
+            // Decimal128Type/Decimal256Type above, and would otherwise fall into the generic
+            // FixedSizeBinaryType case below and be silently mapped to BYTES. The engine only ever
+            // hands this connector Decimal128 for a decimal column, so narrower decimals are refused
+            // rather than given a NUMERIC/BIGNUMERIC mapping of their own.
+            case Decimal32Type or Decimal64Type:
+                throw Unsupported(column, type, output);
+
             case StringType or LargeStringType:
                 return ("STRING", null, null);
 

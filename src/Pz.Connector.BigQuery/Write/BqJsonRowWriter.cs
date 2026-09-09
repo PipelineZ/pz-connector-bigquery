@@ -90,6 +90,16 @@ internal sealed class BqJsonRowWriter(Schema schema, bool withSequence)
             case Decimal128Array a: writer.WriteStringValue(a.GetSqlDecimal(row)!.Value.ToString()); break;
             case Decimal256Array a: writer.WriteStringValue(a.GetString(row)); break;
 
+            // Decimal32Array/Decimal64Array share FixedSizeBinaryArray's ancestry, same as
+            // Decimal128Array/Decimal256Array above; BqSchemaMap already refuses the corresponding
+            // field types, so this is unreachable in practice, but the guard stays here too rather
+            // than let a decimal instance ever fall into the generic FixedSizeBinaryArray case below
+            // and be base64-encoded as raw bytes instead of refused.
+            case Decimal32Array or Decimal64Array:
+                throw new InvalidOperationException(
+                    $"column '{field.Name}': array type '{array.GetType().Name}' has no NDJSON encoding "
+                    + "-- it should have been refused by BqSchemaMap before reaching the row writer");
+
             case BooleanArray a: writer.WriteBooleanValue(a.GetValue(row).GetValueOrDefault()); break;
 
             // LargeStringArray/StringArray each extend their non-string Binary counterpart, so they
@@ -117,6 +127,33 @@ internal sealed class BqJsonRowWriter(Schema schema, bool withSequence)
                     $"column '{field.Name}': array type '{array.GetType().Name}' has no NDJSON encoding "
                     + "-- it should have been refused by BqSchemaMap before reaching the row writer");
         }
+    }
+
+    // A dedicated float overload, rather than widening to double first: double.ToString() on a
+    // widened float carries the extra binary-to-decimal noise of the widening itself (1.1f becomes
+    // 1.100000023841858 as a double), where Utf8JsonWriter.WriteNumberValue(float) instead writes
+    // the shortest round-trippable decimal for the float value actually stored.
+    private static void WriteFloatingPoint(Utf8JsonWriter writer, float value)
+    {
+        if (float.IsNaN(value))
+        {
+            writer.WriteStringValue("NaN");
+            return;
+        }
+
+        if (float.IsPositiveInfinity(value))
+        {
+            writer.WriteStringValue("Infinity");
+            return;
+        }
+
+        if (float.IsNegativeInfinity(value))
+        {
+            writer.WriteStringValue("-Infinity");
+            return;
+        }
+
+        writer.WriteNumberValue(value);
     }
 
     private static void WriteFloatingPoint(Utf8JsonWriter writer, double value)

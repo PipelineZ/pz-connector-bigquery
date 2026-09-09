@@ -76,6 +76,34 @@ public sealed class BqJsonRowWriterTests
     }
 
     [Fact]
+    public void Finite_float_is_written_with_its_own_shortest_round_trip_text()
+    {
+        // Widening 1.1f to double before formatting would produce "1.100000023841858" -- the
+        // widening itself introduces that noise, since 1.1f is not exactly representable and its
+        // nearest double is not the nearest double to the decimal 1.1.
+        var schema = SchemaOf(new Field("f", FloatType.Default, nullable: true));
+        var batch = new RecordBatch(schema, [new FloatArray.Builder().Append(1.1f).Build()], 1);
+
+        var text = WriteToText(new BqJsonRowWriter(schema, withSequence: false), batch, 0, out _);
+
+        Assert.Equal("{\"f\":1.1}\n", text);
+    }
+
+    [Theory]
+    [InlineData(float.NaN, "NaN")]
+    [InlineData(float.PositiveInfinity, "Infinity")]
+    [InlineData(float.NegativeInfinity, "-Infinity")]
+    public void Non_finite_floats_are_written_as_strings(float value, string expected)
+    {
+        var schema = SchemaOf(new Field("f", FloatType.Default, nullable: true));
+        var batch = new RecordBatch(schema, [new FloatArray.Builder().Append(value).Build()], 1);
+
+        var text = WriteToText(new BqJsonRowWriter(schema, withSequence: false), batch, 0, out _);
+
+        Assert.Equal($"{{\"f\":\"{expected}\"}}\n", text);
+    }
+
+    [Fact]
     public void Decimal128_is_a_digit_string()
     {
         var type = new Decimal128Type(38, 9);
@@ -101,6 +129,22 @@ public sealed class BqJsonRowWriterTests
         var text = WriteToText(new BqJsonRowWriter(schema, withSequence: false), batch, 0, out _);
 
         Assert.StartsWith("{\"amount\":\"123.456", text);
+    }
+
+    // Decimal32Array shares FixedSizeBinaryArray's ancestry with Decimal128Array/Decimal256Array;
+    // BqSchemaMap already refuses the corresponding field type (PZBQ0303), and the row writer must
+    // never silently base64-encode its raw bytes if a batch somehow reaches it anyway.
+    [Fact]
+    public void Decimal32_column_throws_at_write_time_rather_than_base64_encoding_raw_bytes()
+    {
+        var type = new Decimal32Type(5, 2);
+        var schema = SchemaOf(new Field("amount", type, nullable: true));
+        var builder = new Decimal32Array.Builder(type);
+        builder.Append(123.45m);
+        var batch = new RecordBatch(schema, [builder.Build()], 1);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            new BqJsonRowWriter(schema, withSequence: false).Write(batch, new MemoryStream(), 0));
     }
 
     [Fact]
