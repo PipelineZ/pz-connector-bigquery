@@ -163,9 +163,12 @@ completes is safe to retry (append is at-least-once, replace and merge are idemp
    - **`replace`**: a query-destination job with `writeDisposition: WRITE_TRUNCATE` -- atomic in
      BigQuery, and it replaces the target's schema with the write's own (a consequence worth
      knowing if the target carries extra columns).
-   - **`merge`**: staged rows are deduplicated on the merge keys (last row within the session wins),
-     then `MERGE ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...`; null keys match
-     null keys.
+   - **`merge`**: staged rows are deduplicated on the merge keys (last row within the session wins;
+     null keys match null keys). When the target already exists, `MERGE ... WHEN MATCHED THEN
+     UPDATE ... WHEN NOT MATCHED THEN INSERT ...` runs against it. `MERGE`'s own syntax requires an
+     existing target, so the first commit into a target that doesn't exist yet instead creates it
+     with a query-destination job over that same deduplicated `SELECT` -- one query job, no `MERGE`
+     statement; every commit after that one runs the real `MERGE`.
 4. The staging table is dropped (best effort) and the spool directory is deleted.
 
 An empty write still runs its target job: an empty append inserts nothing, an empty replace
@@ -188,6 +191,12 @@ truncates the target, an empty merge is a no-op, and a missing target is still c
 | timestamp without time zone | `DATETIME` | `yyyy-MM-ddTHH:mm:ss.ffffff` |
 | time32/time64 | `TIME` | `HH:mm:ss.ffffff` |
 | list/struct/map/union/dictionary/interval/duration/null | refused (`PZBQ0303`) | -- |
+
+On the wire, the connector emits BigQuery's legacy type aliases (`INTEGER`, `FLOAT`, `BOOLEAN`)
+rather than the GoogleSQL names in the table above -- the Storage Read API surface this connector
+also uses accepts only the legacy spellings, and BigQuery treats both as the same type. Schema
+comparison against an existing target (`fail_on_change`, below) normalizes both spellings, so a
+target created through the console with `INT64`/`FLOAT64`/`BOOL` columns is not a mismatch.
 
 Every mapped column is `NULLABLE`; `MaxTextLengths` is ignored (`STRING` is unbounded).
 
