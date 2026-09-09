@@ -154,7 +154,7 @@ public sealed class BqSinkBehaviorTests
         builder.AppendRow([1L]);
         builder.AppendRow([1L]);
         builder.AppendRow([2L]);
-        using var batch = builder.Flush()!;
+        var batch = builder.Flush()!; // disposed by WriteAsync's own loop below
 
         var sink = await OpenSinkAsync();
         var spec = Spec(table, mode: "merge", keys: ["id"]);
@@ -202,17 +202,24 @@ public sealed class BqSinkBehaviorTests
         Assert.False(ex.IsTransient);
         Assert.Contains("PZBQ0304", ex.Message);
         Assert.Contains("'name'", ex.Message);
+
+        var leaked = (await _bq.ListTablesAsync(BqFixture.Dataset)).Where(t => t.StartsWith("pz_load_", StringComparison.Ordinal));
+        Assert.Empty(leaked);
     }
 
+    // No batch is written here: evolve is refused at BeginWriteAsync, before a session (and
+    // therefore a spool) exists at all -- offline coverage for exactly this
+    // (BqWriteSessionTests.Evolve_is_refused_at_BeginWriteAsync_with_no_network_call) also proves no
+    // network call is made; here the target's continued absence is the docker-observable half.
     [SkippableFact]
-    public async Task Evolve_is_refused_before_any_table_exists()
+    public async Task Evolve_is_refused_at_BeginWriteAsync_before_any_table_exists()
     {
         var table = BqFixture.NewName("evolve");
         var sink = await OpenSinkAsync();
         var spec = Spec(table, schemaPolicy: "evolve");
 
         var ex = await Assert.ThrowsAsync<PzConnectorException>(
-            async () => await WriteAsync(sink, spec, IdName, [IdNameBatch([(1, "a")])]));
+            async () => await sink.BeginWriteAsync(spec, IdName, CancellationToken.None));
 
         Assert.False(ex.IsTransient);
         Assert.Contains("PZBQ0305", ex.Message);

@@ -40,6 +40,9 @@ public sealed class BqSinkAcceptance : SinkConnectorAcceptanceTests
     // pins BqSql.Merge's exact (real-BigQuery-correct) SQL shape, and BqWriteSessionTests proves both
     // the dispatch to it for an existing merge target and the WRITE_TRUNCATE disposition for replace,
     // without needing this emulator to execute or honor either.
+    // If BqFixture.Image is ever bumped past 0.8.1 and no longer exhibits either behaviour, remove
+    // this exclusion and let these three facts run for real -- they are the correct, real-BigQuery
+    // proof this ruling stands in for, not a permanent substitute for it.
     protected override bool ShouldRun(string fact) =>
         fact is not ("Merge_upserts_by_keys" or "Merge_is_idempotent" or "Replace_mode_overwrites_the_prior_commit");
 
