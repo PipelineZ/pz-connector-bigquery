@@ -4,8 +4,9 @@ using Pz.Connectors.Abstractions;
 namespace Pz.Connector.BigQuery;
 
 /// <summary>Turns a parsed <see cref="BqConnectionConfig"/> into the credential its REST and gRPC
-/// clients share. <c>None</c> yields no credential and no <c>Authorization</c> header at all -- the
-/// emulator/proxy case spec §4 restricts to when <c>endpoint</c> is set. Every failure here is offline
+/// clients share. <c>None</c> yields no credential and no <c>Authorization</c> header at all -- only
+/// valid when <c>endpoint</c> is set (an emulator or authenticating proxy, never Google itself).
+/// Every failure here is offline
 /// (a bad key file or a broken ADC environment) rather than a network error, so all three are
 /// non-transient.</summary>
 internal static class BqAuth

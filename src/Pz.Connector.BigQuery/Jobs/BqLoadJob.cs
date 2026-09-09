@@ -1,10 +1,10 @@
 namespace Pz.Connector.BigQuery;
 
-/// <summary>Builds the load job that lands one spool file into the staging table (spec §7.1 step
-/// 2): NDJSON in, appended (the staging table is created empty immediately before, so every load
-/// job append-only), and refusing to create the table itself (<c>CREATE_NEVER</c> -- a missing
-/// staging table at this point is a bug in the commit sequence, not something a load job should
-/// paper over).</summary>
+/// <summary>Builds the load job that lands one spool file into the staging table: NDJSON in,
+/// appended (the staging table is created empty immediately before, so every load job is
+/// append-only), and refusing to create the table itself (<c>CREATE_NEVER</c> -- a missing staging
+/// table at this point is a bug in the commit sequence, not something a load job should paper
+/// over).</summary>
 internal static class BqLoadJob
 {
     public static BqJob Build(string jobId, string? location, TableRef staging, BqTableSchema schema) =>

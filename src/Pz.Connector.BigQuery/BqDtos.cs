@@ -11,9 +11,9 @@ namespace Pz.Connector.BigQuery;
 internal sealed record BqTableReference(string? ProjectId, string? DatasetId, string? TableId);
 
 /// <summary>One column. <see cref="Fields"/> is only ever populated for a <c>RECORD</c>/<c>STRUCT</c>
-/// column (self-referencing, matching BigQuery's own nested schema shape) -- this connector's schema
-/// map (spec §7.2) never emits one, but a table read back from BigQuery may still carry one for a
-/// column this connector does not otherwise touch.</summary>
+/// column (self-referencing, matching BigQuery's own nested schema shape) -- this connector's own
+/// schema map never emits one, but a table read back from BigQuery may still carry one for a column
+/// this connector does not otherwise touch.</summary>
 internal sealed record BqFieldSchema(string? Name, string? Type, string? Mode, string? Precision, string? Scale, BqFieldSchema[]? Fields);
 
 internal sealed record BqTableSchema(BqFieldSchema[]? Fields);

@@ -2,7 +2,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Pz.Connector.BigQuery;
 
-/// <summary>Submission and polling over the <see cref="BqJob"/> wire shape (spec §8). A
+/// <summary>Submission and polling over the <see cref="BqJob"/> wire shape. A
 /// client-generated <c>jobReference.jobId</c> is what makes a retried <c>jobs.insert</c> after a
 /// lost response land on <c>409 duplicate</c> instead of a second real job -- <see cref="NewJobId"/>
 /// mints that id, and <see cref="BqRestClient.InsertJobAsync"/> is what falls through to

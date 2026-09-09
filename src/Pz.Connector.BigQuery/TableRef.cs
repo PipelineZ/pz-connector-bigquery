@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace Pz.Connector.BigQuery;
 
-/// <summary>A fully-resolved BigQuery table address (spec §5). Parsed once from an entity name plus
+/// <summary>A fully-resolved BigQuery table address. Parsed once from an entity name plus
 /// the connection's default project, then carried everywhere a table identity is needed: REST paths
 /// (<see cref="ResourcePath"/>) and generated SQL (<see cref="Quoted"/>). Charsets match what BigQuery
 /// itself accepts for each part -- project ids may carry the domain-scoped <c>:</c>, dataset ids are
@@ -44,7 +44,7 @@ internal readonly partial record struct TableRef(string Project, string Dataset,
     }
 
     /// <summary>Parses an entity name naming a table: <c>dataset.table</c> (using
-    /// <paramref name="defaultProject"/>) or <c>project.dataset.table</c> (spec §5). Any other shape,
+    /// <paramref name="defaultProject"/>) or <c>project.dataset.table</c>. Any other shape,
     /// or a backtick anywhere in the text, is refused.</summary>
     public static bool TryParse(string entity, string defaultProject, out TableRef result, out string? error)
     {

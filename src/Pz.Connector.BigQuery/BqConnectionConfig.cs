@@ -7,7 +7,7 @@ namespace Pz.Connector.BigQuery;
 /// at all -- meaningful only against an emulator or an authenticating proxy, never against Google.</summary>
 internal enum BqAuthKind { ServiceAccount, Adc, None }
 
-/// <summary>The typed connection surface (spec §4). <see cref="RestBase"/> always ends with <c>/</c>
+/// <summary>The typed connection surface. <see cref="RestBase"/> always ends with <c>/</c>
 /// so request paths compose relatively against it (the RFC 3986 lesson: a path-bearing base URL is
 /// clobbered by a leading-slash request path). <see cref="StagingDataset"/> is a <see cref="TableRef"/>
 /// with <see cref="TableRef.Table"/> set to <c>""</c> -- a dataset has no table part, and reusing

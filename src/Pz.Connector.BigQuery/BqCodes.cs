@@ -1,6 +1,6 @@
 namespace Pz.Connector.BigQuery;
 
-/// <summary>PZBQ error codes (spec §9). Every user-facing <c>PzConnectorException</c> message has the
+/// <summary>PZBQ error codes. Every user-facing <c>PzConnectorException</c> message has the
 /// shape <c>bigquery: PZBQ####: &lt;redacted text&gt;</c>. Codes are grouped by the failure surface
 /// that raises them: 01xx connection config (validated before any network call), 02xx read, 03xx
 /// write, 04xx remote (whatever the BigQuery service or the transport itself reports back).</summary>

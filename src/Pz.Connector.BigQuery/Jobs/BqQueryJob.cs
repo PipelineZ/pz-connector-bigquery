@@ -1,7 +1,7 @@
 namespace Pz.Connector.BigQuery;
 
-/// <summary>Builds the one query job that touches a sink's target table (spec §7.1 step 4, append
-/// and replace variants -- merge uses a DML statement instead, still through this same builder).
+/// <summary>Builds the one query job that touches a sink's target table (the append and replace
+/// write modes -- merge uses a DML statement instead, still through this same builder).
 /// <paramref name="destination"/>/<paramref name="writeDisposition"/>/<paramref name="createDisposition"/>
 /// are set only when given: a plain query with no destination (the merge statement, or any ad hoc
 /// SQL this connector never targets at a table) needs none of the three. When
