@@ -63,12 +63,31 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
         return ValueTask.FromResult(errors.Count == 0 ? ValidationResult.Success : ValidationResult.Failed([.. errors]));
     }
 
-    ValueTask<ISource> ISourceConnector.OpenAsync(ConnectorConfig config, CancellationToken ct) =>
-        throw new NotImplementedException();
+    ValueTask<ISource> ISourceConnector.OpenAsync(ConnectorConfig config, CancellationToken ct)
+    {
+        var connection = ParseOrThrow(config);
+        var credential = BqAuth.Create(connection);
+        var rest = new BqRestClient(new HttpClient(), connection, credential, connection.Redactor,
+            _loggerFactory.CreateLogger<BqRestClient>());
+        var factory = new BqReadSessionFactory(connection, credential, connection.Redactor);
+        return ValueTask.FromResult<ISource>(
+            new BqSource(connection, rest, factory, connection.Redactor, _loggerFactory.CreateLogger<BqSource>(), _time));
+    }
 
     ValueTask<ISink> ISinkConnector.OpenAsync(ConnectorConfig config, CancellationToken ct) =>
         throw new NotImplementedException();
 
     public ValueTask<ConnectionCheck> CheckConnectionAsync(ConnectorConfig config, CancellationToken ct) =>
         throw new NotImplementedException();
+
+    // Redaction-free: BqConnectionConfig.Parse never embeds a secret's own text in an error message
+    // (every error names a key or shape, never the value that failed), so no BqRedactor built from a
+    // successful parse exists yet to route this failure message through.
+    private static BqConnectionConfig ParseOrThrow(ConnectorConfig config)
+    {
+        var errors = new List<string>();
+        return BqConnectionConfig.Parse(config, errors)
+            ?? throw new PzConnectorException(
+                BqCodes.Message(BqCodes.Config_Invalid, BqRedactor.None, string.Join("; ", errors)), isTransient: false);
+    }
 }

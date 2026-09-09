@@ -23,4 +23,16 @@
     <InternalsVisibleTo Include="Pz.Connector.BigQuery.Tests" />
   </ItemGroup>
 
+  <!-- First-party code is held to zero trim/AOT warnings by the compile-time analyzers under
+       TreatWarningsAsErrors; what is demoted here is only the ILC-stage per-assembly rollup
+       (IL2104/IL3053) for the Storage Read API's own dependency stack: Google.Apis.Core and
+       Google.Api.Gax.Grpc's internals, and the Newtonsoft.Json they pull in for request/response DTO
+       serialization, third-party code whose warnings cannot be fixed from this repository (same
+       precedent as pz's own Pz.Cli.csproj for the identical Google/Newtonsoft stack). -->
+  <PropertyGroup Condition="'$(PublishAot)' == 'true'">
+    <ILLinkTreatWarningsAsErrors>false</ILLinkTreatWarningsAsErrors>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);IL2104;IL3053</WarningsNotAsErrors>
+    <MSBuildWarningsNotAsErrors>$(MSBuildWarningsNotAsErrors);IL2104;IL3053</MSBuildWarningsNotAsErrors>
+  </PropertyGroup>
+
 </Project>

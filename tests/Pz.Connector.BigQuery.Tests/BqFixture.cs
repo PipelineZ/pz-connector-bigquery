@@ -261,6 +261,33 @@ public sealed class BqFixture : IAsyncLifetime
         return AssembleRows(pages);
     }
 
+    /// <summary>Runs a DDL/DML statement (e.g. <c>CREATE VIEW ...</c>) via <c>jobs.query</c> to
+    /// completion, ignoring any result rows. Unlike <see cref="QueryAsync"/>, such a statement's
+    /// response carries an empty <c>schema</c> object with no <c>fields</c> array -- <see cref="AssembleRows"/>
+    /// is built for genuine row-returning queries and throws on that shape, so this reuses the same
+    /// polling as <see cref="QueryAsync"/> but stops short of assembling rows.</summary>
+    public async Task ExecuteStatementAsync(string sql)
+    {
+        var body = JsonSerializer.Serialize(new { query = sql, useLegacySql = false });
+        var text = await SendAsync(HttpMethod.Post, $"/bigquery/v2/projects/{Project}/queries", body).ConfigureAwait(false);
+
+        var page = ParsePage(text);
+        var jobId = GetJobId(page);
+        var location = GetLocation(page);
+
+        for (var attempt = 0; !IsComplete(page); attempt++)
+        {
+            if (attempt >= 100)
+            {
+                throw new TimeoutException($"statement job {jobId} did not complete in time");
+            }
+
+            await Task.Delay(100).ConfigureAwait(false);
+            var pollText = await SendAsync(HttpMethod.Get, QueryResultsPath(jobId, location, null), null).ConfigureAwait(false);
+            page = ParsePage(pollText);
+        }
+    }
+
     /// <summary>Parses one <c>jobs.query</c>/<c>jobs.getQueryResults</c> response and throws if it
     /// carries any <c>errors[]</c> entry -- the wire shape's own signal for a query-level failure,
     /// separate from an HTTP-level non-2xx that <see cref="SendAsync"/> already turns into an
