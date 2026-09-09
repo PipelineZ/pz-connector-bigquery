@@ -101,6 +101,8 @@ public sealed class BqFixture : IAsyncLifetime
         await SendAsync(HttpMethod.Post, $"/bigquery/v2/projects/{Project}/datasets/{dataset}/tables", body).ConfigureAwait(false);
     }
 
+    // Any non-2xx (a genuine 404 as much as a transient 500) reads as "table absent" -- deliberate
+    // for an existence check, where "not found" is the expected non-exceptional outcome.
     public async Task<bool> TableExistsAsync(string table, string? dataset = null)
     {
         dataset ??= Dataset;
@@ -108,6 +110,7 @@ public sealed class BqFixture : IAsyncLifetime
         return response.IsSuccessStatusCode;
     }
 
+    // Same non-2xx-means-absent shape as TableExistsAsync, for the same reason.
     public async Task<JsonElement?> GetTableAsync(string table)
     {
         using var response = await Http.GetAsync($"/bigquery/v2/projects/{Project}/datasets/{Dataset}/tables/{table}").ConfigureAwait(false);
@@ -120,10 +123,8 @@ public sealed class BqFixture : IAsyncLifetime
         return JsonDocument.Parse(text).RootElement.Clone();
     }
 
-    public async Task DeleteTableAsync(string table)
-    {
-        using var response = await Http.DeleteAsync($"/bigquery/v2/projects/{Project}/datasets/{Dataset}/tables/{table}").ConfigureAwait(false);
-    }
+    public Task DeleteTableAsync(string table) =>
+        SendAsync(HttpMethod.Delete, $"/bigquery/v2/projects/{Project}/datasets/{Dataset}/tables/{table}", null);
 
     public Task CreateDatasetAsync(string dataset) =>
         SendAsync(HttpMethod.Post, $"/bigquery/v2/projects/{Project}/datasets",
@@ -213,53 +214,156 @@ public sealed class BqFixture : IAsyncLifetime
         throw new TimeoutException($"load job {jobId} did not reach DONE in time");
     }
 
-    /// <summary>Runs <paramref name="sql"/> via <c>jobs.query</c> and maps each result row to a
+    /// <summary>Runs <paramref name="sql"/> via <c>jobs.query</c> and maps every result row to a
     /// JSON object keyed by the query's own returned schema (the wire shape is a schema-relative
-    /// array, <c>rows[].f[].v</c>, not a self-describing object).</summary>
-    public async Task<List<JsonElement>> QueryAsync(string sql)
+    /// array, <c>rows[].f[].v</c>, not a self-describing object). <paramref name="maxResults"/>, when
+    /// given, is passed straight through in the request body -- against real BigQuery it forces a
+    /// small page size; this emulator ignores it and always returns every row in one page (verified:
+    /// a 3-row query with <c>maxResults: 1</c> still came back with all 3 rows and no
+    /// <c>pageToken</c>), so <see cref="AssembleRows"/> carries the paging-assembly unit coverage
+    /// instead of a fixture test. A response with <c>jobComplete: false</c> is polled via
+    /// <c>jobs.getQueryResults</c> (bounded, same 100 x 100ms shape as <see cref="PollJobAsync"/>)
+    /// until it turns true, and every <c>pageToken</c> the server hands back is followed the same way
+    /// until none remains, so a large or slow query never comes back silently truncated.</summary>
+    public async Task<List<JsonElement>> QueryAsync(string sql, int? maxResults = null)
     {
-        var body = JsonSerializer.Serialize(new { query = sql, useLegacySql = false });
+        var body = maxResults is int max
+            ? JsonSerializer.Serialize(new { query = sql, useLegacySql = false, maxResults = max })
+            : JsonSerializer.Serialize(new { query = sql, useLegacySql = false });
         var text = await SendAsync(HttpMethod.Post, $"/bigquery/v2/projects/{Project}/queries", body).ConfigureAwait(false);
-        using var doc = JsonDocument.Parse(text);
-        var root = doc.RootElement;
-        var fields = root.TryGetProperty("schema", out var schema)
-            ? schema.GetProperty("fields").EnumerateArray().Select(f => f.GetProperty("name").GetString()!).ToList()
-            : [];
 
-        var result = new List<JsonElement>();
-        if (!root.TryGetProperty("rows", out var rows))
-        {
-            return result;
-        }
+        var page = ParsePage(text);
+        var jobId = GetJobId(page);
+        var location = GetLocation(page);
 
-        foreach (var row in rows.EnumerateArray())
+        for (var attempt = 0; !IsComplete(page); attempt++)
         {
-            using var buffer = new MemoryStream();
-            using (var writer = new Utf8JsonWriter(buffer))
+            if (attempt >= 100)
             {
-                writer.WriteStartObject();
-                var values = row.GetProperty("f").EnumerateArray().ToList();
-                for (var i = 0; i < fields.Count && i < values.Count; i++)
-                {
-                    var v = values[i].GetProperty("v");
-                    writer.WritePropertyName(fields[i]);
-                    if (v.ValueKind == JsonValueKind.Null)
-                    {
-                        writer.WriteNullValue();
-                    }
-                    else
-                    {
-                        writer.WriteStringValue(v.GetString() ?? v.GetRawText());
-                    }
-                }
-
-                writer.WriteEndObject();
+                throw new TimeoutException($"query job {jobId} did not complete in time");
             }
 
-            result.Add(JsonDocument.Parse(buffer.ToArray()).RootElement);
+            await Task.Delay(100).ConfigureAwait(false);
+            var pollText = await SendAsync(HttpMethod.Get, QueryResultsPath(jobId, location, null), null).ConfigureAwait(false);
+            page = ParsePage(pollText);
+        }
+
+        var pages = new List<JsonElement> { page };
+        var pageToken = GetPageToken(page);
+        while (!string.IsNullOrEmpty(pageToken))
+        {
+            var pageText = await SendAsync(HttpMethod.Get, QueryResultsPath(jobId, location, pageToken), null).ConfigureAwait(false);
+            var nextPage = ParsePage(pageText);
+            pages.Add(nextPage);
+            pageToken = GetPageToken(nextPage);
+        }
+
+        return AssembleRows(pages);
+    }
+
+    /// <summary>Parses one <c>jobs.query</c>/<c>jobs.getQueryResults</c> response and throws if it
+    /// carries any <c>errors[]</c> entry -- the wire shape's own signal for a query-level failure,
+    /// separate from an HTTP-level non-2xx that <see cref="SendAsync"/> already turns into an
+    /// exception.</summary>
+    private static JsonElement ParsePage(string text)
+    {
+        using var doc = JsonDocument.Parse(text);
+        var root = doc.RootElement.Clone();
+        if (root.TryGetProperty("errors", out var errors) && errors.GetArrayLength() > 0)
+        {
+            throw new InvalidOperationException($"query reported errors: {errors}");
+        }
+
+        return root;
+    }
+
+    private static bool IsComplete(JsonElement page) =>
+        !page.TryGetProperty("jobComplete", out var complete) || complete.GetBoolean();
+
+    private static string? GetJobId(JsonElement page) =>
+        page.TryGetProperty("jobReference", out var jobRef) && jobRef.TryGetProperty("jobId", out var jobId) ? jobId.GetString() : null;
+
+    private static string? GetLocation(JsonElement page) =>
+        page.TryGetProperty("jobReference", out var jobRef) && jobRef.TryGetProperty("location", out var loc) ? loc.GetString() : null;
+
+    private static string? GetPageToken(JsonElement page) =>
+        page.TryGetProperty("pageToken", out var token) ? token.GetString() : null;
+
+    private static string QueryResultsPath(string? jobId, string? location, string? pageToken)
+    {
+        var path = $"/bigquery/v2/projects/{Project}/queries/{jobId}";
+        var query = new List<string>();
+        if (!string.IsNullOrEmpty(location))
+        {
+            query.Add("location=" + Uri.EscapeDataString(location));
+        }
+
+        if (!string.IsNullOrEmpty(pageToken))
+        {
+            query.Add("pageToken=" + Uri.EscapeDataString(pageToken));
+        }
+
+        return query.Count == 0 ? path : path + "?" + string.Join("&", query);
+    }
+
+    /// <summary>Combines every already-fetched query-result page into the final row list, using the
+    /// schema carried on the first page that has one (later pages of a paged result do not always
+    /// repeat it) -- pure and static so it can be exercised by a unit test with synthetic pages,
+    /// with no live emulator needed to prove the paging assembly itself is correct.</summary>
+    internal static List<JsonElement> AssembleRows(IReadOnlyList<JsonElement> pages)
+    {
+        List<string>? fields = null;
+        var result = new List<JsonElement>();
+        foreach (var page in pages)
+        {
+            if (fields is null && page.TryGetProperty("schema", out var schema))
+            {
+                fields = schema.GetProperty("fields").EnumerateArray().Select(f => f.GetProperty("name").GetString()!).ToList();
+            }
+
+            if (!page.TryGetProperty("rows", out var rows))
+            {
+                continue;
+            }
+
+            foreach (var row in rows.EnumerateArray())
+            {
+                result.Add(MapRow(row, fields ?? []));
+            }
         }
 
         return result;
+    }
+
+    // A RECORD or REPEATED cell's "v" is nested JSON, not a string/number/bool; GetString() then
+    // returns null and the GetRawText() fallback below writes that nested JSON back out as an
+    // escaped string rather than unwrapping it -- no fixture in this repo yet exercises such a
+    // column.
+    private static JsonElement MapRow(JsonElement row, List<string> fields)
+    {
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            var values = row.GetProperty("f").EnumerateArray().ToList();
+            for (var i = 0; i < fields.Count && i < values.Count; i++)
+            {
+                var v = values[i].GetProperty("v");
+                writer.WritePropertyName(fields[i]);
+                if (v.ValueKind == JsonValueKind.Null)
+                {
+                    writer.WriteNullValue();
+                }
+                else
+                {
+                    writer.WriteStringValue(v.GetString() ?? v.GetRawText());
+                }
+            }
+
+            writer.WriteEndObject();
+        }
+
+        return JsonDocument.Parse(buffer.ToArray()).RootElement;
     }
 
     private async Task<string> SendAsync(HttpMethod method, string path, string? body)
