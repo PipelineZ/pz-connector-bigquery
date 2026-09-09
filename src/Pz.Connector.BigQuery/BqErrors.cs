@@ -47,7 +47,7 @@ internal static class BqErrors
                     $"{context}: {detail} -- the Storage API cannot read views; use `query: select * from <view>` instead", ex);
 
             case StatusCode.InvalidArgument:
-                return NonTransient(BqCodes.Remote_InvalidQuery, redactor, $"{context}: {detail}", ex);
+                return InvalidArgument(ex, redactor, context);
 
             case StatusCode.NotFound:
                 return NonTransient(BqCodes.Read_TableNotFound, redactor, $"{context}: {detail}", ex);
@@ -83,6 +83,11 @@ internal static class BqErrors
     /// unchanged just because the authoritative check ran too late to stop <see cref="FromRpc"/> from
     /// being called in the first place.</summary>
     public static PzConnectorException GenericInvalidArgument(RpcException ex, BqRedactor redactor, string context) =>
+        InvalidArgument(ex, redactor, context);
+
+    // Shared by FromRpc's plain InvalidArgument arm and GenericInvalidArgument so the message shape
+    // for an uncategorized InvalidArgument cannot drift between the two callers.
+    private static PzConnectorException InvalidArgument(RpcException ex, BqRedactor redactor, string context) =>
         NonTransient(BqCodes.Remote_InvalidQuery, redactor, $"{context}: {ex.Status.Detail}", ex);
 
     /// <summary>A client-side failure before any BigQuery response arrived at all -- DNS, refused
