@@ -60,9 +60,17 @@ internal class BqSpool(string dir, long rollBytes = 64 * 1024 * 1024)
     /// which particular file failed to delete. This method itself may still throw on a genuine I/O
     /// failure -- every caller in <c>BqWriteSession</c> guards it individually rather than this type
     /// swallowing it silently, so a caller can log with the context (output name, commit vs. abort)
-    /// this type does not have.</summary>
+    /// this type does not have.
+    ///
+    /// <para>Closes <see cref="_current"/> first when it is still open: an open file handle inside
+    /// the directory does not stop a recursive delete on Linux, but does on Windows, so a caller
+    /// that reaches here without going through <see cref="CloseAsync"/> first (an abort after a
+    /// mid-write failure, say) must still get a directory delete that succeeds on every OS.</para></summary>
     public virtual void Delete()
     {
+        _current?.Dispose();
+        _current = null;
+
         if (Directory.Exists(dir))
         {
             Directory.Delete(dir, recursive: true);

@@ -100,15 +100,26 @@ public sealed class BqSpoolTests : IDisposable
     }
 
     [Fact]
-    public void Delete_removes_the_directory()
+    public async Task Delete_closes_an_open_written_to_stream_before_removing_the_directory()
     {
         var spool = new BqSpool(_dir);
-        _ = spool.Current;
+        var writer = new StreamWriter(spool.Current, leaveOpen: true);
+        await writer.WriteAsync("{\"a\":1}\n");
+        await writer.FlushAsync();
+        await writer.DisposeAsync();
         Assert.True(Directory.Exists(_dir));
+        Assert.True(spool.IsOpen);
 
+        // An open file handle inside the directory does not stop Directory.Delete on Linux, but
+        // does on Windows -- Delete() must close it first so this succeeds on every OS.
         spool.Delete();
 
         Assert.False(Directory.Exists(_dir));
+        Assert.False(spool.IsOpen);
+
+        // A second Delete(), with the directory already gone and no stream left open, is a no-op.
+        var ex = Record.Exception(spool.Delete);
+        Assert.Null(ex);
     }
 
     [Fact]
