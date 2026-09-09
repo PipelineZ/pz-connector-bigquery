@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net.Http.Headers;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
 using Apache.Arrow;
@@ -87,12 +88,25 @@ public sealed class LiveBigQueryFacts
             ?? throw new InvalidOperationException($"bad live connection config: {string.Join("; ", errors)}");
         var credential = BqAuth.Create(connection);
         var http = new HttpClient();
-        var rest = new BqRestClient(http, connection, credential, connection.Redactor, NullLogger.Instance);
-        var ctx = new LiveContext(project, dataset, credential, rest, http);
+        try
+        {
+            var rest = new BqRestClient(http, connection, credential, connection.Redactor, NullLogger.Instance);
+            var ctx = new LiveContext(project, dataset, credential, rest, http);
 
-        await SendAsync(ctx, HttpMethod.Post, $"bigquery/v2/projects/{project}/datasets",
-            "{\"datasetReference\":{\"projectId\":\"" + project + "\",\"datasetId\":\"" + dataset + "\"}}").ConfigureAwait(false);
-        return ctx;
+            // No `location` is passed on this create or on any job submission -- every DDL/DML/query
+            // job in this file relies on the project's dataset-default location.
+            await SendAsync(ctx, HttpMethod.Post, $"bigquery/v2/projects/{project}/datasets",
+                "{\"datasetReference\":{\"projectId\":\"" + project + "\",\"datasetId\":\"" + dataset + "\"}}").ConfigureAwait(false);
+            return ctx;
+        }
+        catch
+        {
+            // No LiveContext escaped this method, so nothing else owns http yet -- without this, a
+            // failed dataset create would leak it (DeleteLiveDatasetAsync never gets a ctx to run
+            // against).
+            http.Dispose();
+            throw;
+        }
     }
 
     private static async Task DeleteLiveDatasetAsync(LiveContext ctx)
@@ -105,6 +119,42 @@ public sealed class LiveBigQueryFacts
         finally
         {
             ctx.Http.Dispose();
+        }
+    }
+
+    /// <summary>Creates a live context, runs <paramref name="body"/> against it, and always attempts
+    /// the dataset delete afterward -- but a failed delete never replaces the fact's own assertion
+    /// failure. If <paramref name="body"/> throws, that exception propagates unwrapped (with its
+    /// original stack trace) regardless of whether cleanup also fails; a cleanup failure only ever
+    /// surfaces on its own, when <paramref name="body"/> itself succeeded, since a dataset that
+    /// failed to delete after an otherwise-passing fact is a real leak worth reporting. Plain
+    /// <c>try { ... } finally { await Delete(...); }</c> in each fact would not have this property:
+    /// an exception thrown from a <c>finally</c> block replaces whatever was already propagating
+    /// from the <c>try</c>, so a correlated failure (the same connector bug breaking both the
+    /// assertion and the cleanup delete) would report the wrong one.</summary>
+    private static async Task RunLiveFactAsync(Func<LiveContext, Task> body)
+    {
+        var ctx = await CreateLiveContextAsync().ConfigureAwait(false);
+        Exception? cleanupError = null;
+        try
+        {
+            await body(ctx).ConfigureAwait(false);
+        }
+        finally
+        {
+            try
+            {
+                await DeleteLiveDatasetAsync(ctx).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                cleanupError = ex;
+            }
+        }
+
+        if (cleanupError is not null)
+        {
+            ExceptionDispatchInfo.Capture(cleanupError).Throw();
         }
     }
 
@@ -266,8 +316,7 @@ public sealed class LiveBigQueryFacts
     public async Task Wide_type_matrix_declares_real_BigQuerys_own_Arrow_types()
     {
         SkipUnlessLive();
-        var ctx = await CreateLiveContextAsync();
-        try
+        await RunLiveFactAsync(async ctx =>
         {
             const string table = "types";
             await ExecuteDdlAsync(ctx, $"""
@@ -306,19 +355,14 @@ public sealed class LiveBigQueryFacts
             var timestamp = Assert.IsType<TimestampType>(FieldOf(schema.Schema, "ts").DataType);
             Assert.Equal(TimeUnit.Microsecond, timestamp.Unit);
             Assert.True(timestamp.Timezone is "UTC" or "+00:00");
-        }
-        finally
-        {
-            await DeleteLiveDatasetAsync(ctx);
-        }
+        });
     }
 
     [SkippableFact]
     public async Task Sink_append_merge_and_replace_round_trip_reading_back_with_a_query_job()
     {
         SkipUnlessLive();
-        var ctx = await CreateLiveContextAsync();
-        try
+        await RunLiveFactAsync(async ctx =>
         {
             const string table = "roundtrip";
 
@@ -350,19 +394,14 @@ public sealed class LiveBigQueryFacts
             var only = Assert.Single(afterReplace);
             Assert.Equal(100, only.Id);
             Assert.Equal("only", only.Name);
-        }
-        finally
-        {
-            await DeleteLiveDatasetAsync(ctx);
-        }
+        });
     }
 
     [SkippableFact]
     public async Task A_view_is_refused_by_the_Storage_Read_API_with_PZBQ0204()
     {
         SkipUnlessLive();
-        var ctx = await CreateLiveContextAsync();
-        try
+        await RunLiveFactAsync(async ctx =>
         {
             const string baseTable = "viewbase";
             const string view = "aview";
@@ -380,19 +419,14 @@ public sealed class LiveBigQueryFacts
 
             Assert.Contains("PZBQ0204", ex.Message, StringComparison.Ordinal);
             Assert.Contains("query:", ex.Message, StringComparison.Ordinal);
-        }
-        finally
-        {
-            await DeleteLiveDatasetAsync(ctx);
-        }
+        });
     }
 
     [SkippableFact]
     public async Task Requesting_three_streams_reads_every_row_of_a_120_row_table_exactly_once()
     {
         SkipUnlessLive();
-        var ctx = await CreateLiveContextAsync();
-        try
+        await RunLiveFactAsync(async ctx =>
         {
             const string table = "streamtable";
             await ExecuteDdlAsync(ctx,
@@ -424,10 +458,6 @@ public sealed class LiveBigQueryFacts
             // Google may grant fewer than the requested 3 streams for a table this small (BigQuery
             // sizes the stream count to the data, not the request) -- the union-of-partitions
             // invariant above is what this fact proves regardless of how many it actually granted.
-        }
-        finally
-        {
-            await DeleteLiveDatasetAsync(ctx);
-        }
+        });
     }
 }

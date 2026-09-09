@@ -15,9 +15,24 @@ internal sealed class FakeHandler : HttpMessageHandler
 
     public List<Recorded> Requests { get; } = [];
 
+    /// <summary>Set once <see cref="Dispose(bool)"/> runs -- <c>new HttpClient(handler)</c> owns and
+    /// disposes the handler by default, so this is how a test proves a caller actually disposed the
+    /// <see cref="HttpClient"/> wrapping this handler rather than leaking it.</summary>
+    public bool Disposed { get; private set; }
+
     public void Add(HttpMethod method, string pathAndQuery, int status, string body, IDictionary<string, string>? headers = null)
     {
         _routes[(method.Method, pathAndQuery)] = (status, body, headers);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            Disposed = true;
+        }
+
+        base.Dispose(disposing);
     }
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)

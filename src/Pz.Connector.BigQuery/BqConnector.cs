@@ -80,7 +80,7 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
     ValueTask<ISource> ISourceConnector.OpenAsync(ConnectorConfig config, CancellationToken ct)
     {
         var connection = ParseOrThrow(config);
-        var (credential, rest) = OpenRest(connection);
+        var (credential, rest) = OpenRest(connection, _httpClientFactory());
         var factory = new BqReadSessionFactory(connection, credential, connection.Redactor);
         var materializer = new BqQueryMaterializer(rest, connection, _time, _loggerFactory.CreateLogger<BqQueryMaterializer>());
         return ValueTask.FromResult<ISource>(
@@ -90,7 +90,7 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
     ValueTask<ISink> ISinkConnector.OpenAsync(ConnectorConfig config, CancellationToken ct)
     {
         var connection = ParseOrThrow(config);
-        var (_, rest) = OpenRest(connection);
+        var (_, rest) = OpenRest(connection, _httpClientFactory());
         return ValueTask.FromResult<ISink>(
             new BqSink(connection, rest, connection.Redactor, _loggerFactory.CreateLogger<BqSink>(), _time, _spoolRollBytes));
     }
@@ -101,7 +101,14 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
     /// parse errors are reported directly instead; a <see cref="PzConnectorException"/> from
     /// <see cref="OpenRest"/> (a bad credential) or the REST call itself already carries its own PZBQ
     /// code and is reported unwrapped. Caller cancellation is not caught, so it propagates unwrapped
-    /// like every other REST path in this connector.</summary>
+    /// like every other REST path in this connector.
+    ///
+    /// <para>Unlike the two <c>OpenAsync</c> paths, whose returned <see cref="ISource"/>/
+    /// <see cref="ISink"/> carries the opened connection for the rest of a run, this is a one-shot
+    /// diagnostic call with nothing to hand ownership of its <see cref="HttpClient"/> to -- so it
+    /// owns and disposes its own, rather than reusing <see cref="OpenRest"/>'s fire-and-forget
+    /// client. A host that calls this repeatedly (e.g. <c>pz mcp</c>'s verify tooling checking one
+    /// connection after another) would otherwise leak one client/handler per call.</para></summary>
     public async ValueTask<ConnectionCheck> CheckConnectionAsync(ConnectorConfig config, CancellationToken ct)
     {
         var errors = new List<string>();
@@ -111,9 +118,10 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
             return new ConnectionCheck(false, string.Join("; ", errors));
         }
 
+        using var httpClient = _httpClientFactory();
         try
         {
-            var (_, rest) = OpenRest(connection);
+            var (_, rest) = OpenRest(connection, httpClient);
             var count = await rest.CountDatasetsAsync(connection.Project, ct).ConfigureAwait(false);
             return new ConnectionCheck(true, count > 0
                 ? $"project {connection.Project}: {count} dataset(s) visible"
@@ -126,11 +134,14 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
     }
 
     /// <summary>The one place that turns a parsed connection into the credential and REST client
-    /// every open (source, sink, connection check) sends its calls through.</summary>
-    private (GoogleCredential? Credential, BqRestClient RestClient) OpenRest(BqConnectionConfig connection)
+    /// every open (source, sink, connection check) sends its calls through. Ownership of
+    /// <paramref name="httpClient"/> stays with the caller -- <c>OpenAsync</c> hands it off unowned
+    /// inside the returned <see cref="ISource"/>/<see cref="ISink"/> exactly as before this helper
+    /// existed, while <see cref="CheckConnectionAsync"/> disposes the one it passes in itself.</summary>
+    private (GoogleCredential? Credential, BqRestClient RestClient) OpenRest(BqConnectionConfig connection, HttpClient httpClient)
     {
         var credential = BqAuth.Create(connection);
-        var rest = new BqRestClient(_httpClientFactory(), connection, credential, connection.Redactor,
+        var rest = new BqRestClient(httpClient, connection, credential, connection.Redactor,
             _loggerFactory.CreateLogger<BqRestClient>());
         return (credential, rest);
     }

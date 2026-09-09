@@ -98,6 +98,18 @@ public sealed class BqConnectorTests
     }
 
     [Fact]
+    public async Task CheckConnectionAsync_disposes_its_own_HttpClient_before_returning()
+    {
+        var handler = new FakeHandler();
+        handler.Add(HttpMethod.Get, "/bigquery/v2/projects/test/datasets?maxResults=1000", 200, """{"datasets":[]}""");
+        var connector = ConnectorOver(handler);
+
+        await connector.CheckConnectionAsync(FakeConfig(), CancellationToken.None);
+
+        Assert.True(handler.Disposed);
+    }
+
+    [Fact]
     public async Task ValidateAsync_is_valid_for_a_well_formed_connection()
     {
         var connector = new BqConnector();
