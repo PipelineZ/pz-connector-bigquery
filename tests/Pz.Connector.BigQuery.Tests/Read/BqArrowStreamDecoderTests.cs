@@ -1,6 +1,7 @@
 using Apache.Arrow;
 using Apache.Arrow.Ipc;
 using Apache.Arrow.Types;
+using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.BigQuery.Tests;
 
@@ -198,5 +199,40 @@ public sealed class BqArrowStreamDecoderTests
 
         await Assert.ThrowsAsync<OperationCanceledException>(async () =>
             await CollectAsync(decoder.DecodeAsync(CancelAfterFirstBlob(firstBlob, cts), cts.Token)));
+    }
+
+    // Cancels the token before the first blob is even yielded, without the enumerator itself
+    // checking it -- so the decoder's own probe of that first blob (DecodeFirstBlobAsync's
+    // self-contained attempt) is what observes the cancellation and throws, not MoveNextAsync.
+    // That is the only way to drive execution through the "catch (Exception ex) when (ex is not
+    // OperationCanceledException)" guard rather than around it.
+    private static async IAsyncEnumerable<ReadOnlyMemory<byte>> CancelDuringFirstBlobProbe(
+        byte[] firstBlob, CancellationTokenSource cts)
+    {
+        cts.Cancel();
+        await Task.Yield();
+        yield return firstBlob;
+    }
+
+    [Fact]
+    public async Task Cancellation_during_the_first_blobs_layout_probe_propagates_unwrapped_not_as_batch_only()
+    {
+        var schema = SampleSchema();
+        var schemaBlob = WriteFullStream(schema, [SampleBatch(schema, [], [])]);
+        var firstBlob = WriteFullStream(schema, [SampleBatch(schema, [1], ["a"])]);
+
+        var decoder = new BqArrowStreamDecoder(schemaBlob);
+        var cts = new CancellationTokenSource();
+
+        var ex = await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await CollectAsync(decoder.DecodeAsync(CancelDuringFirstBlobProbe(firstBlob, cts), cts.Token)));
+
+        // The exact-type assertion above already rules out PzConnectorException; spelled out here
+        // because that reclassification is precisely what the catch-filter guard exists to prevent.
+        Assert.IsNotType<PzConnectorException>(ex);
+
+        // Neither Layout assignment in DecodeFirstBlobAsync ran: the guard let the cancellation
+        // through before the catch block could reclassify it as "must be BatchOnly."
+        Assert.Equal(BlobLayout.Unknown, decoder.Layout);
     }
 }

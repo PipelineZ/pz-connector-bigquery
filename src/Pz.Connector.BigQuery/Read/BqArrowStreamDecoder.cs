@@ -31,6 +31,13 @@ internal sealed class BqArrowStreamDecoder(ReadOnlyMemory<byte> serializedSchema
         return reader.Schema;
     }
 
+    /// <summary>The <see cref="BlobLayout.SelfContained"/> path decodes each blob's memory
+    /// zero-copy: a yielded batch's array buffers may be direct slices over the
+    /// <see cref="ReadOnlyMemory{T}"/> the caller handed in for that blob, not a private copy. Each
+    /// blob's memory must therefore stay valid and unmodified for as long as any batch decoded from
+    /// it is still alive, and callers must never pass a rented or otherwise reused buffer as a
+    /// blob -- reusing or overwriting it after yielding would silently corrupt already-yielded
+    /// batches rather than fail loudly.</summary>
     public async IAsyncEnumerable<RecordBatch> DecodeAsync(
         IAsyncEnumerable<ReadOnlyMemory<byte>> serializedBatches,
         [EnumeratorCancellation] CancellationToken ct)
