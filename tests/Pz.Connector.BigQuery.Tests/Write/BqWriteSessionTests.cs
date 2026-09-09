@@ -216,17 +216,17 @@ public sealed class BqWriteSessionTests
     }
 
     /// <summary>A <see cref="BqSpool"/> whose <see cref="Delete"/> always throws -- <see cref="BqSpool"/>
-    /// is not sealed specifically to allow this seam. Used to prove the Critical/Important cleanup
-    /// findings deterministically: no permission tricks, no platform-specific filesystem behavior,
-    /// no race against a real directory delete.</summary>
+    /// is not sealed specifically to allow this seam. Used to prove the cleanup-never-throws and
+    /// primary-exception-wins constraints below deterministically: no permission tricks, no
+    /// platform-specific filesystem behavior, no race against a real directory delete.</summary>
     private sealed class ThrowingDeleteSpool(string dir) : BqSpool(dir)
     {
         public override void Delete() => throw new IOException("simulated spool deletion failure");
     }
 
-    /// <summary>Critical finding: a spool-deletion failure in <c>CommitAsync</c>'s <c>finally</c>
-    /// must never discard an already-successful commit's <see cref="WriteResult"/> -- the engine
-    /// would otherwise retry a write that already landed (duplicate rows in <c>append</c> mode).</summary>
+    /// <summary>A spool-deletion failure in <c>CommitAsync</c>'s <c>finally</c> must never discard an
+    /// already-successful commit's <see cref="WriteResult"/> -- the engine would otherwise retry a
+    /// write that already landed (duplicate rows in <c>append</c> mode).</summary>
     [Fact]
     public async Task Commit_still_returns_WriteResult_when_spool_deletion_fails()
     {
@@ -246,9 +246,9 @@ public sealed class BqWriteSessionTests
         Assert.Equal(0, result.RowsWritten);
     }
 
-    /// <summary>Critical finding, other half: when the target job itself fails, that PRIMARY
-    /// exception -- not the spool's own I/O exception -- must be what the caller sees. A cleanup
-    /// failure masking the real cause would misreport an invalid-SQL failure as an unrelated
+    /// <summary>The other half of the constraint above: when the target job itself fails, that
+    /// PRIMARY exception -- not the spool's own I/O exception -- must be what the caller sees. A
+    /// cleanup failure masking the real cause would misreport an invalid-SQL failure as an unrelated
     /// filesystem error.</summary>
     [Fact]
     public async Task Commit_surfaces_the_primary_exception_not_a_spool_deletion_failure()
@@ -269,8 +269,8 @@ public sealed class BqWriteSessionTests
         Assert.Contains("PZBQ0407", ex.Message);
     }
 
-    /// <summary>Important finding: an aborted session's spool-deletion failure must not propagate
-    /// out of <see cref="ISinkWriteSession.AbortAsync"/> either.</summary>
+    /// <summary>An aborted session's spool-deletion failure must not propagate out of
+    /// <see cref="ISinkWriteSession.AbortAsync"/> either.</summary>
     [Fact]
     public async Task Abort_does_not_throw_when_spool_deletion_fails()
     {
@@ -284,7 +284,7 @@ public sealed class BqWriteSessionTests
         Assert.Null(ex);
     }
 
-    /// <summary>Important finding: <see cref="ISinkWriteSession.AbortAsync"/> must close the spool's
+    /// <summary><see cref="ISinkWriteSession.AbortAsync"/> must close the spool's
     /// open file handle before deleting the directory -- deleting first (the pre-fix order) leaves a
     /// dangling handle on every platform and hard-fails on Windows. Proved directly against
     /// <see cref="BqSpool.IsOpen"/> rather than the delete's success/failure, since deleting a
@@ -395,7 +395,7 @@ public sealed class BqWriteSessionTests
         Assert.Empty(handler.Requests);
     }
 
-    /// <summary>Important finding: <c>Spool_rolling_lands_every_row_across_multiple_load_jobs</c>
+    /// <summary><c>Spool_rolling_lands_every_row_across_multiple_load_jobs</c>
     /// (docker) only counts rows, which would pass unchanged even if rolling never happened (one
     /// file, one load job, same 15 rows). This proves the actual mechanism: two batches with
     /// <c>RollBytes = 1</c> roll into two separate spool files, so <c>CommitAsync</c> submits two
