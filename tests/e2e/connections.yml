@@ -1,0 +1,17 @@
+# Both directions through the packaged connector: read the seeded table, write an append output.
+# auth: none is only valid with endpoint set -- meaningful against the emulator, never against Google.
+bq:
+  connector: bigquery
+  project: test
+  auth: none
+  endpoint: ${BQ_REST}
+  storage_endpoint: ${BQ_GRPC}
+  staging_dataset: e2e
+  entities:
+    orders_in:
+      read:
+        entity: e2e.orders_in
+    orders_out:
+      write:
+        entity: e2e.orders_out
+        strategy: append

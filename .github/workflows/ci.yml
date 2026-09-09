@@ -1,0 +1,116 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build Pz.Connector.BigQuery.slnx -c Release
+      # ubuntu has docker, so the emulator-backed Docker facts run; windows cannot pull Linux images,
+      # so it also excludes those. LiveBigQuery needs a real GCP project and credentials neither
+      # runner has, so both legs exclude it -- it stays a local/manual suite.
+      - if: runner.os == 'Linux'
+        run: >
+          dotnet test Pz.Connector.BigQuery.slnx -c Release --no-build --filter "Category!=LiveBigQuery"
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+      - if: runner.os == 'Windows'
+        run: >
+          dotnet test Pz.Connector.BigQuery.slnx -c Release --no-build --filter "Category!=Docker&Category!=LiveBigQuery"
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+
+  # The other half of the proof: a stranger declares the connector by package id, runs `pz restore`,
+  # and pz spawns the Native AOT binary. The suite above never touches pz's resolver, materializer
+  # or process host; this job proves the AOT publish, the generated manifest and the PCP handshake
+  # fit together against the released pz, with a live node (the emulator) on both ends.
+  pack-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish the host RID (Native AOT) and pack
+        run: |
+          set -euo pipefail
+          # A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet
+          # cache: the restore folded into `publish -r` alone does not pull the RID-specific packs
+          # this build needs (NETSDK1112), even though the same restore run standalone does.
+          dotnet restore src/Pz.Connector.BigQuery -r linux-x64
+          dotnet publish src/Pz.Connector.BigQuery -c Release -r linux-x64 --no-restore
+          dotnet pack src/Pz.Connector.BigQuery -c Release -o packages
+          ls packages
+          VERSION="$(ls packages/Pz.Connector.BigQuery.*.nupkg | sed -E 's|.*/Pz\.Connector\.BigQuery\.(.*)\.nupkg|\1|')"
+          echo "PKG_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          unzip -p "packages/Pz.Connector.BigQuery.${VERSION}.nupkg" pz.connector.json | tee manifest.json
+          grep -q '"runtime": "process"' manifest.json
+          grep -q '"name": "bigquery"' manifest.json
+          grep -q '"projectDirectoryAnchor": true' manifest.json
+          for cap in ColumnPruning PredicatePushdown BoundedWindow InclusiveWatermarkBound PartitionedRead Merge ReplaceWrites Transactional; do
+            grep -q "\"${cap}\"" manifest.json
+          done
+      - name: Start the emulator
+        run: |
+          set -euo pipefail
+          docker run -d --name bq -p 9050:9050 -p 9060:9060 \
+            ghcr.io/goccy/bigquery-emulator:0.8.1 --project=test --dataset=e2e
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:9050/bigquery/v2/projects/test/datasets >/dev/null 2>&1 && break
+            sleep 2
+          done
+          # Table schemas use legacy type names (INTEGER/STRING) -- the emulator's Storage Read API
+          # rejects INT64 and friends when they appear in a table's own schema.
+          curl -sf -X POST http://localhost:9050/bigquery/v2/projects/test/datasets/e2e/tables \
+            -H 'Content-Type: application/json' \
+            -d '{"tableReference":{"projectId":"test","datasetId":"e2e","tableId":"orders_in"},"schema":{"fields":[{"name":"id","type":"INTEGER"},{"name":"name","type":"STRING"}]}}'
+          curl -sf -X POST http://localhost:9050/bigquery/v2/projects/test/datasets/e2e/tables/orders_in/insertAll \
+            -H 'Content-Type: application/json' \
+            -d '{"rows":[{"json":{"id":1,"name":"ann"}},{"json":{"id":2,"name":"bob"}},{"json":{"id":3,"name":"cy"}}]}'
+      - name: Install pz, restore from the local feed, run, conformance-test
+        env:
+          BQ_REST: http://localhost:9050
+          BQ_GRPC: localhost:9060
+        run: |
+          set -euo pipefail
+          dotnet tool install --global pz --version 0.6.0
+          cd tests/e2e
+          sed -i "s/0.0.0-PLACEHOLDER/${PKG_VERSION}/" project.yml
+          pz restore --feeds "${GITHUB_WORKSPACE}/packages"
+          PKG_DIR=".pz/packages/Pz.Connector.BigQuery/${PKG_VERSION}"
+          test -f "${PKG_DIR}/native/Pz.Connector.BigQuery"
+          pz run
+          # Three rows in, three rows out.
+          ROWS="$(curl -sf -X POST http://localhost:9050/bigquery/v2/projects/test/queries \
+            -H 'Content-Type: application/json' \
+            -d '{"query":"select count(*) as c from `e2e.orders_out`","useLegacySql":false}' \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['rows'][0]['f'][0]['v'])")"
+          test "${ROWS}" -eq 3
+          # Append is at-least-once: a second run lands the three again and stays green.
+          pz run
+          ROWS="$(curl -sf -X POST http://localhost:9050/bigquery/v2/projects/test/queries \
+            -H 'Content-Type: application/json' \
+            -d '{"query":"select count(*) as c from `e2e.orders_out`","useLegacySql":false}' \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['rows'][0]['f'][0]['v'])")"
+          test "${ROWS}" -eq 6
+          pz connector test "${PKG_DIR}" --config probe.yml | tee report.txt
+          ! grep -q FAIL report.txt
