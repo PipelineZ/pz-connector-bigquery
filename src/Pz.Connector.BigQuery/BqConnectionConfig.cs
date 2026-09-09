@@ -57,16 +57,23 @@ internal sealed partial record BqConnectionConfig(
         var endpointText = config.GetString("endpoint");
         var restBase = ParseEndpoint(endpointText, errors);
 
+        var hasKeyFile = !string.IsNullOrEmpty(keyFile);
+        var hasKeyJson = !string.IsNullOrEmpty(keyJson);
+
         if (authKind == BqAuthKind.ServiceAccount)
         {
-            var hasFile = !string.IsNullOrEmpty(keyFile);
-            var hasJson = !string.IsNullOrEmpty(keyJson);
-            if (hasFile == hasJson)
+            if (hasKeyFile == hasKeyJson)
             {
-                errors.Add(hasFile
+                errors.Add(hasKeyFile
                     ? "'service_account' auth takes 'key_file' or 'key_json', not both"
                     : "'service_account' auth requires 'key_file' or 'key_json'");
             }
+        }
+        else if (authKind == BqAuthKind.Adc && (hasKeyFile || hasKeyJson))
+        {
+            var offending = string.Join(" and ", new[] { hasKeyFile ? "'key_file'" : null, hasKeyJson ? "'key_json'" : null }
+                .Where(k => k is not null));
+            errors.Add($"'adc' auth takes no further keys; remove {offending} (only 'service_account' auth uses a key)");
         }
         else if (authKind == BqAuthKind.None && string.IsNullOrEmpty(endpointText))
         {

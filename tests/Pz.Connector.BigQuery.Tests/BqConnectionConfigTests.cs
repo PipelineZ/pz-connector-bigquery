@@ -74,7 +74,7 @@ public sealed class BqConnectionConfigTests
     }
 
     [Fact]
-    public void Adc_needs_no_further_keys()
+    public void Adc_with_no_extra_keys_parses_cleanly()
     {
         var errors = new List<string>();
         var config = BqConnectionConfig.Parse(Config(new() { ["project"] = "p", ["auth"] = "adc" }), errors);
@@ -83,6 +83,32 @@ public sealed class BqConnectionConfigTests
         Assert.Equal(BqAuthKind.Adc, config!.AuthKind);
         Assert.Null(config.KeyFile);
         Assert.Null(config.KeyJson);
+    }
+
+    [Fact]
+    public void Adc_rejects_key_file_and_or_key_json()
+    {
+        var errors = new List<string>();
+        Assert.Null(BqConnectionConfig.Parse(Config(new()
+        {
+            ["project"] = "p", ["auth"] = "adc", ["key_file"] = "sa.json",
+        }), errors));
+        Assert.Contains(errors, e => e.Contains("'adc' auth takes no further keys") && e.Contains("'key_file'"));
+
+        errors.Clear();
+        Assert.Null(BqConnectionConfig.Parse(Config(new()
+        {
+            ["project"] = "p", ["auth"] = "adc", ["key_json"] = "{}",
+        }), errors));
+        Assert.Contains(errors, e => e.Contains("'adc' auth takes no further keys") && e.Contains("'key_json'"));
+
+        errors.Clear();
+        Assert.Null(BqConnectionConfig.Parse(Config(new()
+        {
+            ["project"] = "p", ["auth"] = "adc", ["key_file"] = "sa.json", ["key_json"] = "{}",
+        }), errors));
+        Assert.Contains(errors, e => e.Contains("'adc' auth takes no further keys")
+            && e.Contains("'key_file'") && e.Contains("'key_json'"));
     }
 
     [Fact]
