@@ -70,8 +70,9 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
         var rest = new BqRestClient(new HttpClient(), connection, credential, connection.Redactor,
             _loggerFactory.CreateLogger<BqRestClient>());
         var factory = new BqReadSessionFactory(connection, credential, connection.Redactor);
+        var materializer = new BqQueryMaterializer(rest, connection, _time, _loggerFactory.CreateLogger<BqQueryMaterializer>());
         return ValueTask.FromResult<ISource>(
-            new BqSource(connection, rest, factory, connection.Redactor, _loggerFactory.CreateLogger<BqSource>(), _time));
+            new BqSource(connection, rest, factory, connection.Redactor, _loggerFactory.CreateLogger<BqSource>(), _time, materializer));
     }
 
     ValueTask<ISink> ISinkConnector.OpenAsync(ConnectorConfig config, CancellationToken ct) =>

@@ -13,9 +13,9 @@ namespace Pz.Connector.BigQuery;
 /// pipeline that references the same dataset from two nodes) reuses it rather than opening a second
 /// session purely to learn the same schema again.
 ///
-/// <para>Query-mode reads (<c>query:</c> instead of <c>entity:</c>) are not implemented yet -- landing a
-/// query's results into <c>staging_dataset</c> before the Storage Read API can stream them back is a
-/// later addition; both entry points throw <see cref="NotImplementedException"/> for that case.</para></summary>
+/// <para>Query-mode reads (<c>query:</c> instead of <c>entity:</c>) resolve to a table the same way --
+/// <see cref="_materializer"/> lands the query's results into <c>staging_dataset</c> via a query job
+/// first, and everything downstream of <see cref="ResolveTableAsync"/> never knows the difference.</para></summary>
 internal sealed class BqSource : ISource
 {
     private readonly BqConnectionConfig _cfg;
@@ -24,10 +24,11 @@ internal sealed class BqSource : ISource
     private readonly BqRedactor _redactor;
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
+    private readonly BqQueryMaterializer _materializer;
     private readonly ConcurrentDictionary<(string Dataset, string Table), DatasetSchema> _schemaCache = new();
 
     public BqSource(BqConnectionConfig cfg, BqRestClient rest, BqReadSessionFactory factory, BqRedactor redactor,
-        ILogger logger, TimeProvider time)
+        ILogger logger, TimeProvider time, BqQueryMaterializer materializer)
     {
         _cfg = cfg;
         _rest = rest;
@@ -35,17 +36,18 @@ internal sealed class BqSource : ISource
         _redactor = redactor;
         _logger = logger;
         _time = time;
+        _materializer = materializer;
     }
 
     public async ValueTask<DatasetSchema> GetSchemaAsync(DatasetSpec spec, CancellationToken ct)
     {
-        var table = ResolveTable(spec);
+        var table = await ResolveTableAsync(spec, ct).ConfigureAwait(false);
         return await ResolveSchemaAsync(spec, table, ct).ConfigureAwait(false);
     }
 
     public async ValueTask<IReadOnlyList<IDatasetPartition>> PlanReadAsync(DatasetSpec spec, ReadHints hints, CancellationToken ct)
     {
-        var table = ResolveTable(spec);
+        var table = await ResolveTableAsync(spec, ct).ConfigureAwait(false);
         var schema = await ResolveSchemaAsync(spec, table, ct).ConfigureAwait(false);
         var config = ParseDatasetConfig(spec);
 
@@ -66,7 +68,7 @@ internal sealed class BqSource : ISource
         return false;
     }
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public ValueTask DisposeAsync() => _materializer.DisposeAsync();
 
     private async Task<DatasetSchema> ResolveSchemaAsync(DatasetSpec spec, TableRef table, CancellationToken ct)
     {
@@ -82,12 +84,12 @@ internal sealed class BqSource : ISource
         return schema;
     }
 
-    private TableRef ResolveTable(DatasetSpec spec)
+    private async Task<TableRef> ResolveTableAsync(DatasetSpec spec, CancellationToken ct)
     {
         var config = ParseDatasetConfig(spec);
         if (config.Query is not null)
         {
-            throw new NotImplementedException("bigquery 'query:' reads are not implemented yet; use 'entity:' to read a table directly");
+            return await _materializer.MaterializeAsync(config.Query, ct).ConfigureAwait(false);
         }
 
         return config.Table!.Value;

@@ -126,6 +126,29 @@ public sealed class BqFixture : IAsyncLifetime
     public Task DeleteTableAsync(string table) =>
         SendAsync(HttpMethod.Delete, $"/bigquery/v2/projects/{Project}/datasets/{Dataset}/tables/{table}", null);
 
+    /// <summary>Every table id currently in <paramref name="dataset"/>, via <c>tables.list</c> --
+    /// used to count/observe tables a query-mode read materializes and drops rather than asserting
+    /// on one name a test already knows (it doesn't: the materializer mints it).</summary>
+    public async Task<List<string>> ListTablesAsync(string dataset)
+    {
+        using var response = await Http.GetAsync($"/bigquery/v2/projects/{Project}/datasets/{dataset}/tables").ConfigureAwait(false);
+        var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"listing tables in '{dataset}' -> {(int)response.StatusCode}: {text}");
+        }
+
+        using var doc = JsonDocument.Parse(text);
+        if (!doc.RootElement.TryGetProperty("tables", out var tables))
+        {
+            return [];
+        }
+
+        return tables.EnumerateArray()
+            .Select(t => t.GetProperty("tableReference").GetProperty("tableId").GetString()!)
+            .ToList();
+    }
+
     public Task CreateDatasetAsync(string dataset) =>
         SendAsync(HttpMethod.Post, $"/bigquery/v2/projects/{Project}/datasets",
             "{\"datasetReference\":{\"projectId\":\"" + Project + "\",\"datasetId\":\"" + dataset + "\"}}");

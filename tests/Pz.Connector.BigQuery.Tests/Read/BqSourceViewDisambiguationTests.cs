@@ -46,8 +46,10 @@ public sealed class BqSourceViewDisambiguationTests
 
     private static async Task<PzConnectorException> GetSchemaThrowsAsync(RpcException rpc, string tableType)
     {
-        var source = new BqSource(Config(), RestClientReturning(tableType), new StubFactory(rpc), BqRedactor.None,
-            NullLogger.Instance, TimeProvider.System);
+        var rest = RestClientReturning(tableType);
+        var materializer = new BqQueryMaterializer(rest, Config(), TimeProvider.System, NullLogger.Instance);
+        var source = new BqSource(Config(), rest, new StubFactory(rpc), BqRedactor.None,
+            NullLogger.Instance, TimeProvider.System, materializer);
         var spec = new DatasetSpec("bigquery", $"{Dataset}.{Table}", new Dictionary<string, object?>());
 
         return await Assert.ThrowsAsync<PzConnectorException>(
