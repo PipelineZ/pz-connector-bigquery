@@ -40,6 +40,12 @@ internal static class BqErrors
         // Status.Detail carries no nullable annotation on Grpc.Core.Api's Status, and a status built
         // with a null detail (as some interceptors and every default(Status) do) hands one back here.
         var detail = ex.Status.Detail;
+        // gRPC bypasses the HTTP handler, so quota exhaustion is counted here.
+        if (ex.StatusCode == StatusCode.ResourceExhausted)
+        {
+            ConnectorStats.Current.AddThrottled(1);
+        }
+
         switch (ex.StatusCode)
         {
             case StatusCode.InvalidArgument when detail?.Contains("view", StringComparison.OrdinalIgnoreCase) == true:
@@ -113,6 +119,13 @@ internal static class BqErrors
         if (string.Equals(reason, "quotaExceeded", StringComparison.Ordinal))
         {
             return NonTransient(BqCodes.Remote_QuotaExceeded, redactor, $"{context}: {Describe(status, reason, message)}");
+        }
+
+        // The HTTP handler already counts 429 and 503; a rateLimitExceeded reason arrives on other
+        // statuses (403, or a job errorResult with none) and is counted here.
+        if (string.Equals(reason, "rateLimitExceeded", StringComparison.Ordinal) && status is not (429 or 503))
+        {
+            ConnectorStats.Current.AddThrottled(1);
         }
 
         if (IsTransientReason(reason))

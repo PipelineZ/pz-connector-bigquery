@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.BigQuery;
 
@@ -75,6 +76,7 @@ internal sealed partial record BqJob
             throw BqErrors.FromJobError(error.Reason, error.Message, rest.Redactor, purpose);
         }
 
+        BqTelemetry.ReportJob(current.Statistics, ConnectorStats.Current);
         logger.LogDebug("bigquery job {JobId} ({Purpose}) finished", jobId, purpose);
         return current;
     }

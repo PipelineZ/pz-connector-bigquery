@@ -21,6 +21,8 @@ namespace Pz.Connector.BigQuery;
 [JsonSerializable(typeof(BqLoadConfig))]
 [JsonSerializable(typeof(BqQueryConfig))]
 [JsonSerializable(typeof(BqJobConfiguration))]
+[JsonSerializable(typeof(BqQueryStatistics))]
+[JsonSerializable(typeof(BqJobStatistics))]
 [JsonSerializable(typeof(BqJob))]
 [JsonSerializable(typeof(BqDatasetListEntry))]
 [JsonSerializable(typeof(BqDatasetList))]
