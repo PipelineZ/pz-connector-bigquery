@@ -16,7 +16,7 @@ namespace Pz.Connector.BigQuery;
 /// contract allows: it is never reused or overwritten once handed to the decoder, so it stays valid for
 /// as long as the batches decoded from it are alive.</para></summary>
 internal sealed class BqPartition(ReadOnlyMemory<byte> serializedSchema, string streamName, BqReadSessionFactory factory,
-    BqRedactor redactor, TableRef table) : IDatasetPartition
+    BqRedactor redactor, TableRef table, IReadOnlyList<string>? hintOrder = null) : IDatasetPartition
 {
     public async IAsyncEnumerable<RecordBatch> ReadAsync(BatchOptions options, [EnumeratorCancellation] CancellationToken ct)
     {
@@ -53,7 +53,7 @@ internal sealed class BqPartition(ReadOnlyMemory<byte> serializedSchema, string 
                 yield break;
             }
 
-            yield return enumerator.Current;
+            yield return BqColumnOrder.Reorder(enumerator.Current, hintOrder);
         }
     }
 }
