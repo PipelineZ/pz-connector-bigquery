@@ -44,7 +44,18 @@ internal sealed record BqJobConfiguration(BqLoadConfig? Load, BqQueryConfig? Que
 /// the submission/polling operations (<c>SubmitAndWaitAsync</c>, <c>NewJobId</c>) over it -- a
 /// same-named static class cannot coexist with this record in one namespace, so the operational
 /// surface is added to the type itself rather than declared as a sibling.</summary>
-internal sealed partial record BqJob(BqJobReference? JobReference, BqJobConfiguration? Configuration, BqJobStatus? Status);
+internal sealed partial record BqJob(
+    BqJobReference? JobReference, BqJobConfiguration? Configuration, BqJobStatus? Status, BqJobStatistics? Statistics = null);
+
+/// <summary>The query-job slice of <c>statistics</c>; present only for query jobs. Numbers are int64
+/// encoded as JSON strings.</summary>
+internal sealed record BqQueryStatistics(string? TotalBytesBilled, string? TotalBytesProcessed);
+
+/// <summary>A job's <c>statistics</c>. Every number is an int64 encoded as a JSON string and every
+/// time is epoch milliseconds in the same encoding. <c>totalBytesBilled</c> lives under
+/// <see cref="Query"/>, not at the top level.</summary>
+internal sealed record BqJobStatistics(
+    string? StartTime, string? EndTime, string? TotalBytesProcessed, string? TotalSlotMs, BqQueryStatistics? Query);
 
 internal sealed record BqDatasetListEntry(string? Id);
 

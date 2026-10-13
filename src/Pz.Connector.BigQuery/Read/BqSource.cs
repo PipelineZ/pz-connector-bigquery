@@ -53,12 +53,15 @@ internal sealed class BqSource : ISource
 
         var restriction = BqRowRestriction.Build(hints, spec, schema.Schema, _redactor);
         var start = _time.GetTimestamp();
-        var sessionInfo = await CreateSessionAsync(table, hints.Columns, restriction, config.Streams, ct).ConfigureAwait(false);
+        // The Storage Read API returns columns in table order whatever order selected_fields lists
+        // them in, so the request is made in table order and each partition restores the hint order.
+        var selected = hints.Columns is { Count: > 0 } columns ? BqColumnOrder.InTableOrder(columns, schema.Schema) : hints.Columns;
+        var sessionInfo = await CreateSessionAsync(table, selected, restriction, config.Streams, ct).ConfigureAwait(false);
         _logger.LogDebug("bigquery: planned dataset {Dataset} into {StreamCount} stream(s) in {ElapsedMs}ms",
             spec.Dataset, sessionInfo.StreamNames.Count, _time.GetElapsedTime(start).TotalMilliseconds);
 
         return sessionInfo.StreamNames
-            .Select(name => (IDatasetPartition)new BqPartition(sessionInfo.SerializedSchema, name, _factory, _redactor, table))
+            .Select(name => (IDatasetPartition)new BqPartition(sessionInfo.SerializedSchema, name, _factory, _redactor, table, hints.Columns))
             .ToList();
     }
 

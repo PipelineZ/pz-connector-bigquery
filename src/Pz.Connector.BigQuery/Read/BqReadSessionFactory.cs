@@ -138,12 +138,17 @@ internal class BqReadSessionFactory(BqConnectionConfig cfg, GoogleCredential? cr
     public async IAsyncEnumerable<ReadOnlyMemory<byte>> ReadRowsAsync(
         string stream, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
+        // Storage Read is gRPC and bypasses the HTTP handler, so each stream opened is one request
+        // and the serialized batch lengths are its wire bytes.
+        var stats = ConnectorStats.Current;
         var client = await ClientAsync(ct).ConfigureAwait(false);
         using var call = client.ReadRows(new ReadRowsRequest { ReadStream = stream });
+        stats.AddRequests(1);
         await foreach (var response in call.GetResponseStream().WithCancellation(ct).ConfigureAwait(false))
         {
             if (response.ArrowRecordBatch is { } batch)
             {
+                stats.AddWireBytes(batch.SerializedRecordBatch.Length);
                 yield return batch.SerializedRecordBatch.Memory;
             }
         }

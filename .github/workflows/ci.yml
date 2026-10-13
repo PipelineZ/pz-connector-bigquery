@@ -66,7 +66,7 @@ jobs:
           grep -q '"runtime": "process"' manifest.json
           grep -q '"name": "bigquery"' manifest.json
           grep -q '"projectDirectoryAnchor": true' manifest.json
-          for cap in ColumnPruning PredicatePushdown BoundedWindow InclusiveWatermarkBound PartitionedRead Merge ReplaceWrites Transactional; do
+          for cap in ColumnPruning PredicatePushdown BoundedWindow InclusiveWatermarkBound PartitionedRead Merge ReplaceWrites Transactional ReportsStats; do
             grep -q "\"${cap}\"" manifest.json
           done
       - name: Start the emulator
@@ -92,7 +92,7 @@ jobs:
           BQ_GRPC: localhost:9060
         run: |
           set -euo pipefail
-          dotnet tool install --global pz --version 0.6.1
+          dotnet tool install --global pz --version 0.11.0
           cd tests/e2e
           sed -i "s/0.0.0-PLACEHOLDER/${PKG_VERSION}/" project.yml
           pz restore --feeds "${GITHUB_WORKSPACE}/packages"
@@ -112,5 +112,9 @@ jobs:
             -d '{"query":"select count(*) as c from `e2e.orders_out`","useLegacySql":false}' \
             | python3 -c "import json,sys; print(json.load(sys.stdin)['rows'][0]['f'][0]['v'])")"
           test "${ROWS}" -eq 6
+          # The run's two BigQuery nodes (the read and the write) must both carry remote stats; a
+          # vacuous pass on zero matching nodes is a failure.
+          RUN_DIR="$(ls -dt .pz/runs/*/ | head -n1)"
+          jq -e '[.nodes[] | select(.connector=="bigquery")] | (length == 2) and (map(.remote.requests > 0) | all)' "${RUN_DIR}run_results.json"
           pz connector test "${PKG_DIR}" --config probe.yml | tee report.txt
           ! grep -q FAIL report.txt

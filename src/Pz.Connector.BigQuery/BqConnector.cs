@@ -3,6 +3,7 @@ using Google.Apis.Auth.OAuth2;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pz.Connectors.Abstractions;
+using Pz.Connectors.Sdk;
 
 namespace Pz.Connector.BigQuery;
 
@@ -15,10 +16,14 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
     private readonly long _spoolRollBytes;
     private readonly Func<HttpClient> _httpClientFactory;
 
-    public BqConnector(ILoggerFactory? loggerFactory = null)
-        : this(loggerFactory, TimeProvider.System)
+    public BqConnector(ILoggerFactory? loggerFactory = null, RemoteCalls? remote = null)
+        : this(loggerFactory, TimeProvider.System, 64 * 1024 * 1024, HttpFactory(remote))
     {
     }
+
+    // The handler counts requests, wire bytes and 429/503 throttles for every REST call.
+    private static Func<HttpClient> HttpFactory(RemoteCalls? remote) =>
+        remote is null ? static () => new HttpClient() : () => new HttpClient(remote.HttpHandler(new HttpClientHandler()));
 
     internal BqConnector(ILoggerFactory? loggerFactory, TimeProvider time, long spoolRollBytes = 64 * 1024 * 1024)
         : this(loggerFactory, time, spoolRollBytes, static () => new HttpClient())
@@ -46,7 +51,7 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
     public ConnectorCapabilities Capabilities =>
         ConnectorCapabilities.ColumnPruning | ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow
         | ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.PartitionedRead | ConnectorCapabilities.Merge
-        | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional;
+        | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional | ConnectorCapabilities.ReportsStats;
 
     public string ConnectionConfigSchema => """
         { "type": "object", "required": ["project", "auth"], "properties": {

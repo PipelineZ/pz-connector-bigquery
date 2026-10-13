@@ -67,6 +67,7 @@ internal sealed class BqWriteSession : ISinkWriteSession
 
     public async ValueTask WriteBatchAsync(RecordBatch batch, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         EnsureOpen();
         // Written synchronously within the call, before any await -- the batch's buffers may be
         // pooled, off-heap native memory the engine reclaims the instant this call returns.

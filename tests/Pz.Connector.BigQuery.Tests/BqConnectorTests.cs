@@ -148,7 +148,7 @@ public sealed class BqConnectorTests
         Assert.Equal(
             ConnectorCapabilities.ColumnPruning | ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow
             | ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.PartitionedRead | ConnectorCapabilities.Merge
-            | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional,
+            | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional | ConnectorCapabilities.ReportsStats,
             connector.Capabilities);
 
         using var connection = JsonDocument.Parse(connector.ConnectionConfigSchema);
