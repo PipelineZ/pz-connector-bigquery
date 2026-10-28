@@ -104,6 +104,7 @@ jobs:
           grep -q '"runtime": "process"' manifest.json
           grep -q '"name": "bigquery"' manifest.json
           grep -q '"projectDirectoryAnchor": true' manifest.json
+          tr -d ' \n' < manifest.json | grep -q '"ambientIdentity":\["gcp"\]'
           for cap in ColumnPruning PredicatePushdown BoundedWindow InclusiveWatermarkBound PartitionedRead Merge ReplaceWrites Transactional; do
             grep -q "\"${cap}\"" manifest.json
           done

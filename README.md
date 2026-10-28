@@ -57,7 +57,11 @@ bq:
 - `project` must match `[a-z0-9.:-]+` -- it is spliced into REST paths and generated SQL.
 - `auth: service_account` takes exactly one of `key_file` (a project-relative path) or `key_json`
   (the unmodified service-account key JSON); `auth: adc` takes neither and resolves through
-  Application Default Credentials; `auth: none` sends no `Authorization` header at all and is only
+  Application Default Credentials (with **pz 0.14.0 or newer** when ADC comes from
+  `GOOGLE_APPLICATION_CREDENTIALS`, such as workload identity federation from AWS or Azure: pz starts
+  the connector with a cleared environment and, from 0.14.0, forwards the GCP identity variables this
+  package declares, shown by `pz restore` as `receives host identity: gcp`; the GCE/GKE/Cloud Run
+  metadata server works with any pz); `auth: none` sends no `Authorization` header at all and is only
   accepted when `endpoint` is also set -- meaningful against an emulator or an authenticating
   proxy, never against Google.
 - `staging_dataset` is required for any `query:` read (BigQuery cannot stream an arbitrary query's

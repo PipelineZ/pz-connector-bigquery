@@ -10,12 +10,16 @@
     <PublishAot>true</PublishAot>
     <!-- key_file is a project-relative path. -->
     <PzProjectDirectoryAnchor>true</PzProjectDirectoryAnchor>
+    <!-- auth: adc resolves Application Default Credentials in this process. pz 0.14+ forwards the GCP
+         identity variables (GOOGLE_APPLICATION_CREDENTIALS, the metadata host) only to a package that
+         declares them. -->
+    <PzAmbientIdentity>gcp</PzAmbientIdentity>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Pz.Connectors.Sdk" Version="0.11.0" />
-    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.11.0" />
+    <PackageReference Include="Pz.Connectors.Sdk" Version="0.14.0" />
+    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.14.0" />
     <PackageReference Include="Google.Cloud.BigQuery.Storage.V1" Version="3.19.0" />
   </ItemGroup>
 
