@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       - run: dotnet build Pz.Connector.BigQuery.slnx -c Release
       # ubuntu has docker, so the emulator-backed Docker facts run; windows cannot pull Linux images,
       # so it also excludes those. LiveBigQuery needs a real GCP project and credentials neither
@@ -49,7 +49,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       - name: Publish the host RID (Native AOT) and pack
         run: |
           set -euo pipefail
