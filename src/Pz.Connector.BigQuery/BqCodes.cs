@@ -34,6 +34,7 @@ internal static class BqCodes
     public const string Write_SchemaEvolveUnsupported = "PZBQ0305";
     public const string Write_BadWriteMode = "PZBQ0306";
     public const string Write_BadOutputOption = "PZBQ0307";
+    public const string Write_NullArrayElement = "PZBQ0308";
 
     // 04xx -- remote: raised classifying a REST, job, or gRPC failure the service or transport
     // reported back. NotFound/PermissionDenied from the Storage Read API (gRPC) land on the 02xx
@@ -59,7 +60,7 @@ internal static class BqCodes
         Read_PermissionDenied, Read_BadDatasetOption,
 
         Write_MergeKeyMissing, Write_ReservedColumnSeq, Write_UnsupportedArrowType, Write_SchemaMismatch,
-        Write_SchemaEvolveUnsupported, Write_BadWriteMode, Write_BadOutputOption,
+        Write_SchemaEvolveUnsupported, Write_BadWriteMode, Write_BadOutputOption, Write_NullArrayElement,
 
         Remote_Transient, Remote_TransientService, Remote_QuotaExceeded, Remote_Unauthenticated, Remote_PermissionDenied,
         Remote_NotFound, Remote_InvalidQuery, Remote_GrpcTransient, Remote_Other,

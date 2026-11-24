@@ -1,4 +1,5 @@
 using Apache.Arrow;
+using Apache.Arrow.Arrays;
 using Apache.Arrow.Types;
 using Pz.Connectors.Abstractions;
 
@@ -141,6 +142,50 @@ public sealed class BqSourceBehaviorTests
 
         var @struct = Assert.IsType<StructType>(FieldOf(schema, "struct_col").DataType);
         Assert.Equal(["a"], @struct.Fields.Select(f => f.Name));
+    }
+
+    [SkippableTheory]
+    [InlineData("rec")]
+    [InlineData("tags")]
+    [InlineData("items")]
+    public async Task Nested_column_arrives_as_a_typed_arrow_struct_or_list(string column)
+    {
+        var table = BqFixture.NewName("nested");
+        await _bq.CreateTableAsync(table, """
+            [
+              {"name":"id","type":"INTEGER"},
+              {"name":"rec","type":"RECORD","fields":[{"name":"n","type":"INTEGER"},{"name":"s","type":"STRING"}]},
+              {"name":"tags","type":"STRING","mode":"REPEATED"},
+              {"name":"items","type":"RECORD","mode":"REPEATED","fields":[{"name":"k","type":"STRING"},{"name":"v","type":"FLOAT"}]}
+            ]
+            """);
+        await _bq.InsertRowsAsync(table,
+        [
+            """{"id":1,"rec":{"n":7,"s":"x"},"tags":["a","b"],"items":[{"k":"x","v":1.5},{"k":"y","v":2.5}]}""",
+        ]);
+
+        var batches = await ReadAsync(Spec(table), new ReadHints([column], null));
+
+        var batch = Assert.Single(batches);
+        var array = batch.Column(0);
+        switch (column)
+        {
+            case "rec":
+                var rec = Assert.IsType<StructArray>(array);
+                Assert.Equal(7L, ((Int64Array)rec.Fields[0]).GetValue(0));
+                Assert.Equal("x", ((StringArray)rec.Fields[1]).GetString(0));
+                break;
+            case "tags":
+                var tags = Assert.IsType<ListArray>(array);
+                Assert.Equal(["a", "b"], Enumerable.Range(tags.ValueOffsets[0], 2).Select(i => ((StringArray)tags.Values).GetString(i)));
+                break;
+            default:
+                var items = Assert.IsType<ListArray>(array);
+                var structs = Assert.IsType<StructArray>(items.Values);
+                Assert.Equal("y", ((StringArray)structs.Fields[0]).GetString(1));
+                Assert.Equal(2.5, ((DoubleArray)structs.Fields[1]).GetValue(1));
+                break;
+        }
     }
 
     [SkippableFact]

@@ -33,6 +33,7 @@ win-x64) and `pz run` spawns it. Needs pz 0.6.0 or newer.
 | `PartitionedRead` | a read fans out across the streams the Storage Read API session grants |
 | `Merge` | a sink output can declare `strategy: merge` with `keys:` |
 | `ReplaceWrites` | a sink output can declare `strategy: replace` |
+| `NestedTypes` | the sink accepts struct, list, fixed-size list and map columns (see the type table below) |
 | `Transactional` | exactly one job touches the write target; a crash before it never leaves a partial write, and `AbortAsync` discards everything staged |
 
 There is no native scan or native copy: BigQuery has no DuckDB extension, so every read and write
@@ -196,7 +197,19 @@ truncates the target, an empty merge is a no-op, and a missing target is still c
 | timestamp with time zone | `TIMESTAMP` | `yyyy-MM-ddTHH:mm:ss.ffffffZ` (UTC) |
 | timestamp without time zone | `DATETIME` | `yyyy-MM-ddTHH:mm:ss.ffffff` |
 | time32/time64 | `TIME` | `HH:mm:ss.ffffff` |
-| list/struct/map/union/dictionary/interval/duration/null | refused (`PZBQ0303`) | -- |
+| struct | `RECORD` | object, subfields mapped recursively |
+| list / fixed-size list | the element type with mode `REPEATED` | array; a null list is written as `[]` (BigQuery does not distinguish the two); a null element is refused (`PZBQ0308`) |
+| map | `REPEATED RECORD` of `(key STRING.., value ..)` | array of `{"key": .., "value": ..}`; a null key is refused (`PZBQ0308`) |
+| union/dictionary/interval/duration/null | refused (`PZBQ0303`) | -- |
+
+A list of lists and a list of maps are refused (`PZBQ0303`), because BigQuery arrays cannot
+contain arrays. A merge key must
+be a flat value: a struct, list or map key is refused (`PZBQ0301`). `fail_on_change` compares nested
+columns recursively and names a mismatch by its dotted path (`rec.n`).
+
+On the read side, `RECORD` columns arrive as Arrow structs and `REPEATED` columns as lists
+(a `REPEATED RECORD` as a list of structs) straight from the Storage Read API; nothing is
+converted to JSON text.
 
 On the wire, the connector emits BigQuery's legacy type aliases (`INTEGER`, `FLOAT`, `BOOLEAN`)
 rather than the GoogleSQL names in the table above -- the emulator used in this connector's own
@@ -251,13 +264,14 @@ Every failure is `bigquery: PZBQ####: <redacted text>`.
 | `PZBQ0205` | the table was not found |
 | `PZBQ0206` | the Storage Read API denied the read (needs `bigquery.readsessions.create` + `bigquery.tables.getData`) |
 | `PZBQ0207` | a dataset read option is unknown or invalid (e.g. `entity` and `query` both set, `streams` out of range) |
-| `PZBQ0301` | a merge key column is missing from the write schema |
+| `PZBQ0301` | a merge key column is missing from the write schema, or is a struct/list/map column |
 | `PZBQ0302` | the write schema uses the reserved column name `_pz_seq` |
 | `PZBQ0303` | an Arrow column type has no BigQuery mapping |
 | `PZBQ0304` | the existing target's schema doesn't match the write (`fail_on_change`) |
 | `PZBQ0305` | `schema_policy: evolve` was requested; only `fail_on_change` is supported |
 | `PZBQ0306` | an unsupported write mode reached the sink (only `append`/`replace`/`merge`) |
 | `PZBQ0307` | a write output option is unknown or invalid |
+| `PZBQ0308` | a list cell holds a null element, or a map cell a null key; BigQuery arrays cannot hold NULL -- filter them in the pipeline, e.g. `list_filter(col, x -> x is not null)` |
 | `PZBQ0401` | no response reached BigQuery (network/timeout) -- transient |
 | `PZBQ0402` | BigQuery reported a transient service condition (`429`/`5xx`, `rateLimitExceeded`, `backendError`, `internalError`, `jobBackendError`, `jobInternalError`) -- transient |
 | `PZBQ0403` | a hard quota was exceeded -- not transient, retrying inside the run cannot help |

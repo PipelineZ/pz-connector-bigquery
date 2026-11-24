@@ -46,6 +46,10 @@ public sealed class BqSinkAcceptance : SinkConnectorAcceptanceTests
     protected override bool ShouldRun(string fact) =>
         fact is not ("Merge_upserts_by_keys" or "Merge_is_idempotent" or "Replace_mode_overwrites_the_prior_commit");
 
+    // NestedOutput is deliberately not overridden: the TestKit nested vector carries null list
+    // elements, which BigQuery arrays cannot hold and the sink refuses (PZBQ0308). The nested
+    // behaviour is covered by BqSinkBehaviorTests and BqJsonRowWriterTests instead.
+
     protected override ISinkConnector CreateSink() => new BqConnector();
 
     protected override ConnectorConfig ValidConfig => new(_bq.ConnectionConfig());

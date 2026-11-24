@@ -149,22 +149,100 @@ public sealed class BqSchemaMapTests
     }
 
     [Fact]
-    public void List_type_is_refused_as_PZBQ0303_naming_the_column()
+    public void List_is_a_repeated_column_of_the_element_type()
+    {
+        var field = BqSchemaMap.MapField(F("tags", new ListType(Int64Type.Default)), "target");
+
+        Assert.Equal("INTEGER", field.Type);
+        Assert.Equal("REPEATED", field.Mode);
+        Assert.Null(field.Fields);
+    }
+
+    [Fact]
+    public void Fixed_size_list_is_a_repeated_column()
+    {
+        var field = BqSchemaMap.MapField(F("pair", new FixedSizeListType(Int32Type.Default, 2)), "target");
+
+        Assert.Equal("INTEGER", field.Type);
+        Assert.Equal("REPEATED", field.Mode);
+    }
+
+    [Fact]
+    public void Struct_is_a_record_with_mapped_subfields()
+    {
+        var type = new StructType([new Field("n", Int32Type.Default, true), new Field("tags", new ListType(StringType.Default), true)]);
+
+        var field = BqSchemaMap.MapField(F("rec", type), "target");
+
+        Assert.Equal("RECORD", field.Type);
+        Assert.Equal("NULLABLE", field.Mode);
+        Assert.Equal(["n", "tags"], field.Fields!.Select(f => f.Name));
+        Assert.Equal("INTEGER", field.Fields![0].Type);
+        Assert.Equal("STRING", field.Fields![1].Type);
+        Assert.Equal("REPEATED", field.Fields![1].Mode);
+    }
+
+    [Fact]
+    public void List_of_struct_is_a_repeated_record()
+    {
+        var item = new StructType([new Field("k", StringType.Default, true)]);
+
+        var field = BqSchemaMap.MapField(F("items", new ListType(item)), "target");
+
+        Assert.Equal("RECORD", field.Type);
+        Assert.Equal("REPEATED", field.Mode);
+        Assert.Equal(["k"], field.Fields!.Select(f => f.Name));
+    }
+
+    [Fact]
+    public void Map_is_a_repeated_record_of_key_and_value()
+    {
+        var field = BqSchemaMap.MapField(F("m", new MapType(StringType.Default, Int32Type.Default)), "target");
+
+        Assert.Equal("RECORD", field.Type);
+        Assert.Equal("REPEATED", field.Mode);
+        Assert.Equal(["key", "value"], field.Fields!.Select(f => f.Name));
+        Assert.Equal("STRING", field.Fields![0].Type);
+        Assert.Equal("INTEGER", field.Fields![1].Type);
+    }
+
+    [Fact]
+    public void Map_with_a_list_value_keeps_the_value_repeated()
+    {
+        var field = BqSchemaMap.MapField(F("m", new MapType(StringType.Default, new ListType(Int64Type.Default))), "target");
+
+        Assert.Equal("REPEATED", field.Fields![1].Mode);
+    }
+
+    [Fact]
+    public void List_of_list_is_refused_as_PZBQ0303_naming_the_column()
     {
         var ex = Assert.Throws<PzConnectorException>(() =>
-            BqSchemaMap.MapField(F("tags", new ListType(Int64Type.Default)), "target"));
+            BqSchemaMap.MapField(F("grid", new ListType(new ListType(Int64Type.Default))), "target"));
 
         Assert.Contains("PZBQ0303", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("tags", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("grid", ex.Message, StringComparison.Ordinal);
         Assert.False(ex.IsTransient);
     }
 
     [Fact]
-    public void Struct_type_is_refused_as_PZBQ0303()
+    public void List_of_map_is_refused_naming_the_nested_path()
+    {
+        var inner = new StructType([new Field("m", new ListType(new MapType(StringType.Default, Int32Type.Default)), true)]);
+
+        var ex = Assert.Throws<PzConnectorException>(() => BqSchemaMap.MapField(F("rec", inner), "target"));
+
+        Assert.Contains("PZBQ0303", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("rec.m", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unsupported_leaf_inside_a_struct_is_refused_with_its_path()
     {
         var ex = Assert.Throws<PzConnectorException>(() =>
-            BqSchemaMap.MapField(F("c", new StructType([new Field("member", Int64Type.Default, true)])), "target"));
-        Assert.Contains("PZBQ0303", ex.Message, StringComparison.Ordinal);
+            BqSchemaMap.MapField(F("c", new StructType([new Field("d", DurationType.Millisecond, true)])), "target"));
+
+        Assert.Contains("c.d", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

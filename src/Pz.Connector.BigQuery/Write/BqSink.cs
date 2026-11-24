@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using Apache.Arrow;
+using Apache.Arrow.Types;
 using Microsoft.Extensions.Logging;
 using Pz.Connectors.Abstractions;
 
@@ -62,6 +63,21 @@ internal sealed class BqSink(
                     BqCodes.Message(BqCodes.Write_MergeKeyMissing, redactor,
                         $"output '{spec.Output}': merge key(s) {string.Join(", ", missing.Select(k => $"'{k}'"))} "
                         + "not present in the write schema"),
+                    isTransient: false);
+            }
+
+            // A nested key would land in the MERGE ON clause and the dedup partition-by, which
+            // BigQuery cannot compare or group on and which has no sane null/equality semantics.
+            var nested = spec.Keys
+                .Where(k => schema.GetFieldByName(k)!.DataType is StructType or ListType or FixedSizeListType or MapType)
+                .ToList();
+            if (nested.Count > 0)
+            {
+                throw new PzConnectorException(
+                    BqCodes.Message(BqCodes.Write_MergeKeyMissing, redactor,
+                        $"output '{spec.Output}': merge key(s) {string.Join(", ", nested.Select(k => $"'{k}'"))} "
+                        + "are struct, list or map columns; a merge key must be a flat value -- choose scalar key columns "
+                        + "or derive one in the pipeline SQL"),
                     isTransient: false);
             }
         }
