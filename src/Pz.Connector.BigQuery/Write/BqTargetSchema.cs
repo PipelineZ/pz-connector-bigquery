@@ -13,8 +13,18 @@ internal static class BqTargetSchema
     /// updates), so an extra target column is not a mismatch.</summary>
     public static IReadOnlyList<string> Diff(BqTableSchema existing, BqTableSchema wanted)
     {
+        var mismatches = new List<string>();
+        DiffFields(existing.Fields ?? [], wanted.Fields ?? [], prefix: "", mismatches);
+        return mismatches;
+    }
+
+    // Recurses into RECORD fields, naming a nested mismatch by its dotted path. A subfield present
+    // only in the target is left alone for the same reason a top-level extra column is.
+    private static void DiffFields(
+        IReadOnlyList<BqFieldSchema> existing, IReadOnlyList<BqFieldSchema> wanted, string prefix, List<string> mismatches)
+    {
         var existingByName = new Dictionary<string, BqFieldSchema>(StringComparer.Ordinal);
-        foreach (var field in existing.Fields ?? [])
+        foreach (var field in existing)
         {
             if (field.Name is { } name)
             {
@@ -22,23 +32,25 @@ internal static class BqTargetSchema
             }
         }
 
-        var mismatches = new List<string>();
-
-        foreach (var wantedField in wanted.Fields ?? [])
+        foreach (var wantedField in wanted)
         {
-            var name = wantedField.Name!;
-            if (!existingByName.TryGetValue(name, out var existingField))
+            var name = prefix + wantedField.Name!;
+            if (!existingByName.TryGetValue(wantedField.Name!, out var existingField))
             {
                 mismatches.Add($"column '{name}' is missing from the target table");
                 continue;
             }
 
-            // REPEATED cannot hold a scalar NDJSON value this connector ever writes; REQUIRED is
-            // fine -- every mapped column is NULLABLE, but a target that additionally forbids null
+            // A scalar write cannot land in a REPEATED column, nor an array in a scalar one; REQUIRED
+            // is fine -- every mapped column is NULLABLE, but a target that additionally forbids null
             // is still a legal write target as long as the data never actually carries a null there.
-            if (string.Equals(existingField.Mode, "REPEATED", StringComparison.Ordinal))
+            var existingRepeated = string.Equals(existingField.Mode, "REPEATED", StringComparison.Ordinal);
+            var wantedRepeated = string.Equals(wantedField.Mode, "REPEATED", StringComparison.Ordinal);
+            if (existingRepeated != wantedRepeated)
             {
-                mismatches.Add($"column '{name}' is REPEATED in the target table; the write schema needs a scalar column");
+                mismatches.Add(existingRepeated
+                    ? $"column '{name}' is REPEATED in the target table; the write schema needs a scalar column"
+                    : $"column '{name}' is not REPEATED in the target table; the write schema needs a REPEATED column");
                 continue;
             }
 
@@ -48,6 +60,12 @@ internal static class BqTargetSchema
             {
                 mismatches.Add(
                     $"column '{name}' has type '{existingField.Type}' in the target table; the write schema needs '{wantedField.Type}'");
+                continue;
+            }
+
+            if (wantedType == "RECORD")
+            {
+                DiffFields(existingField.Fields ?? [], wantedField.Fields ?? [], name + ".", mismatches);
                 continue;
             }
 
@@ -62,8 +80,6 @@ internal static class BqTargetSchema
                     + $"the write schema needs {wantedField.Type}({wantedField.Precision},{wantedField.Scale})");
             }
         }
-
-        return mismatches;
     }
 
     // tables.get reports the legacy spelling (INTEGER/FLOAT/BOOLEAN); this connector's own schema
@@ -74,6 +90,7 @@ internal static class BqTargetSchema
         "INT64" => "INTEGER",
         "FLOAT64" => "FLOAT",
         "BOOL" => "BOOLEAN",
+        "STRUCT" => "RECORD",
         null => "",
         _ => type,
     };

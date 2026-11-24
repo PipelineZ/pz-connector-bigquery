@@ -41,13 +41,59 @@ internal static class BqSchemaMap
         return new BqTableSchema(fields.ToArray());
     }
 
-    public static BqFieldSchema MapField(Field f, string output)
+    public static BqFieldSchema MapField(Field f, string output) => MapNamed(f.Name, f.DataType, f.Name, output);
+
+    // BigQuery has no list-of-list and no null array element, and a map is modelled the way BigQuery
+    // models one: a REPEATED RECORD of (key, value). A list of maps is therefore a list of repeated
+    // records, which BigQuery refuses the same as a list of lists.
+    private static BqFieldSchema MapNamed(string name, IArrowType type, string column, string output)
     {
-        var (type, precision, scale) = MapType(f.DataType, f.Name, output);
-        return new BqFieldSchema(f.Name, type, "NULLABLE", precision, scale, null);
+        switch (type)
+        {
+            case ListType l:
+                return Repeated(name, l.ValueDataType, column, output, type);
+
+            case FixedSizeListType l:
+                return Repeated(name, l.ValueDataType, column, output, type);
+
+            case StructType s:
+                if (s.Fields.Count == 0)
+                {
+                    throw Unsupported(column, type, output, "BigQuery refuses a RECORD with no fields");
+                }
+
+                return new BqFieldSchema(name, "RECORD", "NULLABLE", null, null,
+                    s.Fields.Select(f => MapNamed(f.Name, f.DataType, $"{column}.{f.Name}", output)).ToArray());
+
+            case MapType m:
+                return new BqFieldSchema(name, "RECORD", "REPEATED", null, null,
+                [
+                    MapNamed(MapKeyName, m.KeyField.DataType, $"{column}.{MapKeyName}", output),
+                    MapNamed(MapValueName, m.ValueField.DataType, $"{column}.{MapValueName}", output),
+                ]);
+
+            default:
+                var (scalar, precision, scale) = MapLeaf(type, column, output);
+                return new BqFieldSchema(name, scalar, "NULLABLE", precision, scale, null);
+        }
     }
 
-    private static (string Type, string? Precision, string? Scale) MapType(IArrowType type, string column, string output)
+    private static BqFieldSchema Repeated(string name, IArrowType element, string column, string output, IArrowType list)
+    {
+        if (element is ListType or FixedSizeListType or MapType)
+        {
+            throw Unsupported(column, list, output, "BigQuery arrays cannot contain arrays or maps");
+        }
+
+        return MapNamed(name, element, column, output) with { Mode = "REPEATED" };
+    }
+
+    /// <summary>The two fields of the REPEATED RECORD a map column becomes.</summary>
+    public const string MapKeyName = "key";
+
+    public const string MapValueName = "value";
+
+    private static (string Type, string? Precision, string? Scale) MapLeaf(IArrowType type, string column, string output)
     {
         switch (type)
         {
@@ -116,8 +162,8 @@ internal static class BqSchemaMap
 
     // BqRedactor.None: this message names only an output, a column, and an Arrow type name, never a
     // value that could carry a secret, so no caller-supplied redactor is needed.
-    private static PzConnectorException Unsupported(string column, IArrowType type, string output) =>
+    private static PzConnectorException Unsupported(string column, IArrowType type, string output, string? reason = null) =>
         new(BqCodes.Message(BqCodes.Write_UnsupportedArrowType, BqRedactor.None,
-                $"{output}: column '{column}' has unsupported Arrow type '{type.Name}'"),
+                $"{output}: column '{column}' has unsupported Arrow type '{type.Name}'" + (reason is null ? "" : $" ({reason})")),
             isTransient: false);
 }

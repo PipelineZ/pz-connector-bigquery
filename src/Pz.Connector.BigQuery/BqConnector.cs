@@ -51,7 +51,7 @@ public sealed class BqConnector : IConnector, ISourceConnector, ISinkConnector
     public ConnectorCapabilities Capabilities =>
         ConnectorCapabilities.ColumnPruning | ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow
         | ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.PartitionedRead | ConnectorCapabilities.Merge
-        | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional | ConnectorCapabilities.ReportsStats;
+        | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional | ConnectorCapabilities.ReportsStats | ConnectorCapabilities.NestedTypes;
 
     public string ConnectionConfigSchema => """
         { "type": "object", "required": ["project", "auth"], "properties": {

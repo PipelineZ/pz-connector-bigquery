@@ -53,6 +53,61 @@ public sealed class BqTargetSchemaTests
         Assert.Contains("tags", diff[0]);
     }
 
+    private static BqFieldSchema Record(string name, string mode, params BqFieldSchema[] fields) =>
+        new(name, "RECORD", mode, null, null, fields);
+
+    [Fact]
+    public void Matching_record_has_no_mismatches()
+    {
+        var existing = Schema(Record("rec", "NULLABLE", Field("n", "INTEGER"), Field("extra", "STRING")));
+        var wanted = Schema(Record("rec", "NULLABLE", Field("n", "INTEGER")));
+
+        Assert.Empty(BqTargetSchema.Diff(existing, wanted));
+    }
+
+    [Fact]
+    public void Struct_spelling_matches_record()
+    {
+        var existing = Schema(new BqFieldSchema("rec", "STRUCT", "NULLABLE", null, null, [Field("n", "INTEGER")]));
+        var wanted = Schema(Record("rec", "NULLABLE", Field("n", "INTEGER")));
+
+        Assert.Empty(BqTargetSchema.Diff(existing, wanted));
+    }
+
+    [Fact]
+    public void Nested_mismatch_is_named_by_its_dotted_path()
+    {
+        var existing = Schema(Record("rec", "NULLABLE", Field("n", "STRING")));
+        var wanted = Schema(Record("rec", "NULLABLE", Field("n", "INTEGER"), Field("m", "INTEGER")));
+
+        var diff = BqTargetSchema.Diff(existing, wanted);
+
+        Assert.Equal(2, diff.Count);
+        Assert.Contains("rec.n", diff[0]);
+        Assert.Contains("rec.m", diff[1]);
+    }
+
+    [Fact]
+    public void Repeated_wanted_column_needs_a_repeated_target()
+    {
+        var existing = Schema(Field("tags", "STRING"));
+        var wanted = Schema(Field("tags", "STRING", mode: "REPEATED"));
+
+        var diff = BqTargetSchema.Diff(existing, wanted);
+
+        Assert.Single(diff);
+        Assert.Contains("REPEATED", diff[0]);
+    }
+
+    [Fact]
+    public void Repeated_record_matches_repeated_record()
+    {
+        var existing = Schema(Record("m", "REPEATED", Field("key", "STRING"), Field("value", "INTEGER")));
+        var wanted = Schema(Record("m", "REPEATED", Field("key", "STRING"), Field("value", "INTEGER")));
+
+        Assert.Empty(BqTargetSchema.Diff(existing, wanted));
+    }
+
     [Fact]
     public void Required_target_column_is_compatible()
     {

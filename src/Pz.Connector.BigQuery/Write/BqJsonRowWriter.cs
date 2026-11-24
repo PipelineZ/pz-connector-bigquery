@@ -3,6 +3,7 @@ using System.Text.Json;
 using Apache.Arrow;
 using Apache.Arrow.Arrays;
 using Apache.Arrow.Types;
+using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.BigQuery;
 
@@ -37,7 +38,15 @@ internal sealed class BqJsonRowWriter(Schema schema, bool withSequence)
             for (var col = 0; col < fields.Count; col++)
             {
                 writer.WritePropertyName(fields[col].Name);
-                WriteValue(writer, fields[col], columns[col], row);
+                try
+                {
+                    WriteValue(writer, fields[col], columns[col], row);
+                }
+                catch (NullElementException ex)
+                {
+                    // nextSequence counts every row of the session, so it doubles as the row number.
+                    throw ex.ToConnectorException(Prefix(fields[col].Name, ex.Path), nextSequence + row + 1);
+                }
             }
 
             if (withSequence)
@@ -66,7 +75,17 @@ internal sealed class BqJsonRowWriter(Schema schema, bool withSequence)
     {
         if (array.IsNull(row))
         {
-            writer.WriteNullValue();
+            // BigQuery does not distinguish a null array from an empty one.
+            if (array is ListArray or FixedSizeListArray)
+            {
+                writer.WriteStartArray();
+                writer.WriteEndArray();
+            }
+            else
+            {
+                writer.WriteNullValue();
+            }
+
             return;
         }
 
@@ -120,6 +139,28 @@ internal sealed class BqJsonRowWriter(Schema schema, bool withSequence)
             case Time32Array a: WriteTime(writer, a.GetTime(row)!.Value); break;
             case Time64Array a: WriteTime(writer, a.GetTime(row)!.Value); break;
 
+            // MapArray extends ListArray, so it must be matched first. A map is BigQuery's REPEATED
+            // RECORD of (key, value).
+            case MapArray a:
+                WriteMap(writer, a, row);
+                break;
+
+            case ListArray a:
+                WriteList(writer, a.Values, a.ValueOffsets[row], a.ValueOffsets[row + 1], ((ListType)a.Data.DataType).ValueField);
+                break;
+
+            case FixedSizeListArray a:
+            {
+                var type = (FixedSizeListType)a.Data.DataType;
+                var start = (a.Offset + row) * type.ListSize;
+                WriteList(writer, a.Values, start, start + type.ListSize, type.ValueField);
+                break;
+            }
+
+            case StructArray a:
+                WriteStruct(writer, a, row);
+                break;
+
             // Every other Arrow type is refused at schema-map time (PZBQ0303); reaching here means a
             // caller handed this writer a batch whose schema was never checked against BqSchemaMap.
             default:
@@ -127,6 +168,89 @@ internal sealed class BqJsonRowWriter(Schema schema, bool withSequence)
                     $"column '{field.Name}': array type '{array.GetType().Name}' has no NDJSON encoding "
                     + "-- it should have been refused by BqSchemaMap before reaching the row writer");
         }
+    }
+
+    // BigQuery arrays cannot hold NULL; a null element is refused rather than dropped, so no data
+    // is lost silently. A null list is written as an empty one (BigQuery does not distinguish them).
+    private static void WriteList(Utf8JsonWriter writer, IArrowArray values, int start, int end, Field element)
+    {
+        writer.WriteStartArray();
+        for (var i = start; i < end; i++)
+        {
+            if (values.IsNull(i))
+            {
+                throw new NullElementException("", "an array element is null; BigQuery arrays cannot hold NULL");
+            }
+
+            WriteValue(writer, element, values, i);
+        }
+
+        writer.WriteEndArray();
+    }
+
+    private static void WriteMap(Utf8JsonWriter writer, MapArray array, int row)
+    {
+        var type = (MapType)array.Data.DataType;
+        var entries = array.KeyValues;
+        writer.WriteStartArray();
+        for (var i = array.ValueOffsets[row]; i < array.ValueOffsets[row + 1]; i++)
+        {
+            if (entries.IsNull(i) || entries.Fields[0].IsNull(i))
+            {
+                throw new NullElementException("", "a map key is null; BigQuery map entries need a key");
+            }
+
+            writer.WriteStartObject();
+            writer.WritePropertyName(BqSchemaMap.MapKeyName);
+            WriteNested(writer, BqSchemaMap.MapKeyName, type.KeyField, entries.Fields[0], i);
+            writer.WritePropertyName(BqSchemaMap.MapValueName);
+            WriteNested(writer, BqSchemaMap.MapValueName, type.ValueField, entries.Fields[1], i);
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+    }
+
+    // Prefixes a null-element path with the subfield it surfaced under, so the final error names the
+    // full dotted column path.
+    private static void WriteNested(Utf8JsonWriter writer, string name, Field field, IArrowArray array, int row)
+    {
+        try
+        {
+            WriteValue(writer, field, array, row);
+        }
+        catch (NullElementException ex)
+        {
+            throw new NullElementException(Prefix(name, ex.Path), ex.Detail);
+        }
+    }
+
+    private static string Prefix(string name, string rest) => rest.Length == 0 ? name : name + "." + rest;
+
+    private sealed class NullElementException(string path, string detail) : Exception(detail)
+    {
+        public string Path { get; } = path;
+
+        public string Detail { get; } = detail;
+
+        public PzConnectorException ToConnectorException(string column, long row) =>
+            new(BqCodes.Message(BqCodes.Write_NullArrayElement, BqRedactor.None,
+                    $"column '{column}', row {row}: {Detail}; filter them out in the pipeline, "
+                    + $"e.g. list_filter({column}, x -> x is not null)"),
+                isTransient: false);
+    }
+
+    private static void WriteStruct(Utf8JsonWriter writer, StructArray array, int row)
+    {
+        var fields = ((StructType)array.Data.DataType).Fields;
+        writer.WriteStartObject();
+        for (var k = 0; k < fields.Count; k++)
+        {
+            writer.WritePropertyName(fields[k].Name);
+            WriteNested(writer, fields[k].Name, fields[k], array.Fields[k], row);
+        }
+
+        writer.WriteEndObject();
     }
 
     // A dedicated float overload, rather than widening to double first: double.ToString() on a

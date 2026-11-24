@@ -288,15 +288,139 @@ public sealed class BqJsonRowWriterTests
     }
 
     [Fact]
-    public void List_column_throws_at_write_time_rather_than_silently_writing_garbage()
+    public void List_is_a_json_array_and_a_null_list_is_empty()
     {
-        var listType = new ListType(Int64Type.Default);
-        var schema = SchemaOf(new Field("tags", listType, nullable: true));
-        var builder = new ListArray.Builder(Int64Type.Default);
+        var builder = new ListArray.Builder(StringType.Default);
+        var values = (StringArray.Builder)builder.ValueBuilder;
         builder.Append();
-        var batch = new RecordBatch(schema, [builder.Build()], 1);
+        values.Append("a");
+        values.Append("b");
+        builder.AppendNull();
+        builder.Append();
+        var array = builder.Build();
+        var schema = SchemaOf(new Field("tags", array.Data.DataType, nullable: true));
+        var batch = new RecordBatch(schema, [array], 3);
 
-        Assert.Throws<InvalidOperationException>(() =>
+        var text = WriteToText(new BqJsonRowWriter(schema, withSequence: false), batch, 0, out _);
+
+        Assert.Equal("{\"tags\":[\"a\",\"b\"]}\n{\"tags\":[]}\n{\"tags\":[]}\n", text);
+    }
+
+    [Fact]
+    public void Null_list_element_is_refused_naming_column_and_row()
+    {
+        var builder = new ListArray.Builder(StringType.Default);
+        var values = (StringArray.Builder)builder.ValueBuilder;
+        builder.Append();
+        values.Append("a");
+        builder.Append();
+        values.Append("b");
+        values.AppendNull();
+        var array = builder.Build();
+        var schema = SchemaOf(new Field("tags", array.Data.DataType, nullable: true));
+        var batch = new RecordBatch(schema, [array], 2);
+
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(() =>
+            new BqJsonRowWriter(schema, withSequence: false).Write(batch, new MemoryStream(), 10));
+
+        Assert.False(ex.IsTransient);
+        Assert.Contains("PZBQ0308", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("'tags'", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("row 12", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("cannot hold NULL", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("list_filter(tags, x -> x is not null)", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Null_element_inside_a_struct_names_the_dotted_path()
+    {
+        var listType = new ListType(new Field("item", Int64Type.Default, true));
+        var lists = new ListArray.Builder(Int64Type.Default);
+        lists.Append();
+        ((Int64Array.Builder)lists.ValueBuilder).AppendNull();
+        var type = new StructType([new Field("xs", listType, true)]);
+        var array = new StructArray(type, 1, [lists.Build()], ArrowBuffer.Empty, 0);
+        var schema = SchemaOf(new Field("rec", type, true));
+        var batch = new RecordBatch(schema, [array], 1);
+
+        var ex = Assert.Throws<Pz.Connectors.Abstractions.PzConnectorException>(() =>
             new BqJsonRowWriter(schema, withSequence: false).Write(batch, new MemoryStream(), 0));
+
+        Assert.Contains("'rec.xs'", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("row 1", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Struct_is_a_json_object_in_field_order_and_a_null_struct_is_null()
+    {
+        var type = new StructType([new Field("n", Int32Type.Default, true), new Field("s", StringType.Default, true)]);
+        var array = new StructArray(type, 2,
+            [new Int32Array.Builder().Append(7).AppendNull().Build(), new StringArray.Builder().Append("x").AppendNull().Build()],
+            new ArrowBuffer.BitmapBuilder().Append(true).Append(false).Build(), nullCount: 1);
+        var schema = SchemaOf(new Field("rec", type, nullable: true));
+        var batch = new RecordBatch(schema, [array], 2);
+
+        var text = WriteToText(new BqJsonRowWriter(schema, withSequence: false), batch, 0, out _);
+
+        Assert.Equal("{\"rec\":{\"n\":7,\"s\":\"x\"}}\n{\"rec\":null}\n", text);
+    }
+
+    [Fact]
+    public void Map_is_an_array_of_key_value_objects()
+    {
+        var builder = new MapArray.Builder(new MapType(StringType.Default, Int32Type.Default));
+        var keys = (StringArray.Builder)builder.KeyBuilder;
+        var values = (Int32Array.Builder)builder.ValueBuilder;
+        builder.Append();
+        keys.Append("k1");
+        values.Append(1);
+        keys.Append("k2");
+        values.AppendNull();
+        builder.AppendNull();
+        builder.Append();
+        var array = builder.Build();
+        var schema = SchemaOf(new Field("m", array.Data.DataType, nullable: true));
+        var batch = new RecordBatch(schema, [array], 3);
+
+        var text = WriteToText(new BqJsonRowWriter(schema, withSequence: false), batch, 0, out _);
+
+        Assert.Equal(
+            "{\"m\":[{\"key\":\"k1\",\"value\":1},{\"key\":\"k2\",\"value\":null}]}\n{\"m\":[]}\n{\"m\":[]}\n", text);
+    }
+
+    [Fact]
+    public void Fixed_size_list_and_list_of_struct_are_arrays()
+    {
+        var pairType = new FixedSizeListType(new Field("item", Int32Type.Default, true), 2);
+        var pairValues = new Int32Array.Builder().Append(1).Append(2).Append(3).Append(4).Build();
+        var pair = new FixedSizeListArray(new ArrayData(pairType, 2, 0, 0, [ArrowBuffer.Empty], [pairValues.Data]));
+
+        var itemType = new StructType([new Field("k", StringType.Default, true)]);
+        var structs = new StructArray(itemType, 2, [new StringArray.Builder().Append("x").Append("y").Build()], ArrowBuffer.Empty, 0);
+        var items = new ListArray(new ListType(new Field("item", itemType, true)), 2,
+            new ArrowBuffer.Builder<int>().AppendRange([0, 1, 2]).Build(), structs, ArrowBuffer.Empty, 0);
+
+        var schema = SchemaOf(new Field("pair", pairType, true), new Field("items", items.Data.DataType, true));
+        var batch = new RecordBatch(schema, [pair, items], 2);
+
+        var text = WriteToText(new BqJsonRowWriter(schema, withSequence: false), batch, 0, out _);
+
+        Assert.Equal(
+            "{\"pair\":[1,2],\"items\":[{\"k\":\"x\"}]}\n{\"pair\":[3,4],\"items\":[{\"k\":\"y\"}]}\n", text);
+    }
+
+    [Fact]
+    public void Timestamp_inside_a_struct_uses_the_subfield_timezone()
+    {
+        var tsType = new TimestampType(TimeUnit.Microsecond, "UTC");
+        var type = new StructType([new Field("at", tsType, true)]);
+        var ts = new TimestampArray.Builder(tsType).Append(new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero)).Build();
+        var array = new StructArray(type, 1, [ts], ArrowBuffer.Empty, 0);
+        var schema = SchemaOf(new Field("rec", type, true));
+        var batch = new RecordBatch(schema, [array], 1);
+
+        var text = WriteToText(new BqJsonRowWriter(schema, withSequence: false), batch, 0, out _);
+
+        Assert.Equal("{\"rec\":{\"at\":\"2026-01-02T03:04:05.000000Z\"}}\n", text);
     }
 }

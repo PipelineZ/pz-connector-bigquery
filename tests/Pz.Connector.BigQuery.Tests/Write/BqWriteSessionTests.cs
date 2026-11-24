@@ -325,6 +325,34 @@ public sealed class BqWriteSessionTests
         Assert.Empty(handler.Requests);
     }
 
+    [Theory]
+    [InlineData("struct")]
+    [InlineData("list")]
+    [InlineData("map")]
+    public async Task Nested_merge_key_is_refused_naming_the_column_with_no_network_call(string kind)
+    {
+        IArrowType type = kind switch
+        {
+            "struct" => new StructType([new Field("a", Int64Type.Default, true)]),
+            "list" => new ListType(Int64Type.Default),
+            _ => new MapType(StringType.Default, Int64Type.Default),
+        };
+        var schema = new Apache.Arrow.Schema([new Field("id", Int64Type.Default, true), new Field("k", type, true)], null);
+        var cfg = Config();
+        var handler = new FakeHandler();
+        var sink = new BqSink(cfg, RestClient(handler, cfg), BqRedactor.None, NullLogger.Instance, TimeProvider.System);
+        var spec = new OutputSpec("bigquery", "e2e.t1", "merge", "fail_on_change", new Dictionary<string, object?>()) { Keys = ["id", "k"] };
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(
+            async () => await sink.BeginWriteAsync(spec, schema, CancellationToken.None));
+
+        Assert.False(ex.IsTransient);
+        Assert.Contains("PZBQ0301", ex.Message);
+        Assert.Contains("'k'", ex.Message);
+        Assert.Contains("flat", ex.Message);
+        Assert.Empty(handler.Requests);
+    }
+
     [Fact]
     public async Task BeginWriteAsync_bad_write_mode_is_PZBQ0306_with_no_network_call()
     {
